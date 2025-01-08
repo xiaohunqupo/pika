@@ -7,16 +7,17 @@
 
 #include <glog/logging.h>
 
-#include "pstd/include/testutil.h"
 #include "net/src/worker_thread.h"
+#include "pstd/include/testutil.h"
 
+#include "dispatch_thread.h"
 #include "net/include/net_conn.h"
 #include "net/src/net_item.h"
 
 namespace net {
 
 WorkerThread::WorkerThread(ConnFactory* conn_factory, ServerThread* server_thread, int queue_limit, int cron_interval)
-    : private_data_(nullptr),
+    :
       server_thread_(server_thread),
       conn_factory_(conn_factory),
       cron_interval_(cron_interval),
@@ -28,11 +29,11 @@ WorkerThread::WorkerThread(ConnFactory* conn_factory, ServerThread* server_threa
   net_multiplexer_->Initialize();
 }
 
-WorkerThread::~WorkerThread() {}
+WorkerThread::~WorkerThread() = default;
 
 int WorkerThread::conn_num() const {
   std::shared_lock lock(rwlock_);
-  return conns_.size();
+  return static_cast<int32_t>(conns_.size());
 }
 
 std::vector<ServerThread::ConnInfo> WorkerThread::conns_info() const {
@@ -58,7 +59,7 @@ std::shared_ptr<NetConn> WorkerThread::MoveConnOut(int fd) {
   }
 }
 
-bool WorkerThread::MoveConnIn(std::shared_ptr<NetConn> conn, const NotifyType& notify_type, bool force) {
+bool WorkerThread::MoveConnIn(const std::shared_ptr<NetConn>& conn, const NotifyType& notify_type, bool force) {
   NetItem it(conn->fd(), conn->ip_port(), notify_type);
   bool success = MoveConnIn(it, force);
   if (success) {
@@ -75,7 +76,7 @@ void* WorkerThread::ThreadMain() {
   NetFiredEvent* pfe = nullptr;
   char bb[2048];
   NetItem ti;
-  std::shared_ptr<NetConn> in_conn = nullptr;
+
 
   struct timeval when;
   gettimeofday(&when, nullptr);
@@ -92,7 +93,7 @@ void* WorkerThread::ThreadMain() {
     if (cron_interval_ > 0) {
       gettimeofday(&now, nullptr);
       if (when.tv_sec > now.tv_sec || (when.tv_sec == now.tv_sec && when.tv_usec > now.tv_usec)) {
-        timeout = (when.tv_sec - now.tv_sec) * 1000 + (when.tv_usec - now.tv_usec) / 1000;
+        timeout = static_cast<int32_t>((when.tv_sec - now.tv_sec) * 1000 + (when.tv_usec - now.tv_usec) / 1000);
       } else {
         DoCronTask();
         when.tv_sec = now.tv_sec + (cron_interval_ / 1000);
@@ -105,12 +106,12 @@ void* WorkerThread::ThreadMain() {
 
     for (int i = 0; i < nfds; i++) {
       pfe = (net_multiplexer_->FiredEvents()) + i;
-      if (pfe == nullptr) {
+      if (!pfe) {
           continue;
       }
       if (pfe->fd == net_multiplexer_->NotifyReceiveFd()) {
-        if (pfe->mask & kReadable) {
-          int32_t nread = read(net_multiplexer_->NotifyReceiveFd(), bb, 2048);
+        if ((pfe->mask & kReadable) != 0) {
+          auto nread = static_cast<int32_t>(read(net_multiplexer_->NotifyReceiveFd(), bb, 2048));
           if (nread == 0) {
             continue;
           } else {
@@ -154,7 +155,7 @@ void* WorkerThread::ThreadMain() {
           continue;
         }
       } else {
-        in_conn = nullptr;
+        std::shared_ptr<NetConn> in_conn = nullptr;
         int should_close = 0;
 
         {
@@ -167,7 +168,7 @@ void* WorkerThread::ThreadMain() {
           }
         }
 
-        if ((pfe->mask & kWritable) && in_conn->is_reply()) {
+        if (((pfe->mask & kWritable) != 0) && in_conn->is_reply()) {
           WriteStatus write_status = in_conn->SendReply();
           in_conn->set_last_interaction(now);
           if (write_status == kWriteAll) {
@@ -184,7 +185,7 @@ void* WorkerThread::ThreadMain() {
           }
         }
 
-        if (!should_close && (pfe->mask & kReadable)) {
+        if ((should_close == 0) && ((pfe->mask & kReadable) != 0)) {
           ReadStatus read_status = in_conn->GetRequest();
           in_conn->set_last_interaction(now);
           if (read_status == kReadAll) {
@@ -198,7 +199,7 @@ void* WorkerThread::ThreadMain() {
           }
         }
 
-        if ((pfe->mask & kErrorEvent) || should_close) {
+        if (((pfe->mask & kErrorEvent) != 0) || (should_close != 0)) {
           net_multiplexer_->NetDelEvent(pfe->fd, 0);
           CloseFd(in_conn);
           in_conn = nullptr;
@@ -226,20 +227,19 @@ void WorkerThread::DoCronTask() {
 
     // Check whether close all connection
     std::lock_guard kl(killer_mutex_);
-    if (deleting_conn_ipport_.count(kKillAllConnsTask)) {
+    if (deleting_conn_ipport_.count(kKillAllConnsTask) != 0U) {
       for (auto& conn : conns_) {
         to_close.push_back(conn.second);
       }
       conns_.clear();
       deleting_conn_ipport_.clear();
-      return;
     }
 
-    std::map<int, std::shared_ptr<NetConn>>::iterator iter = conns_.begin();
+    auto iter = conns_.begin();
     while (iter != conns_.end()) {
       std::shared_ptr<NetConn> conn = iter->second;
       // Check connection should be closed
-      if (deleting_conn_ipport_.count(conn->ip_port())) {
+      if (deleting_conn_ipport_.count(conn->ip_port()) != 0U) {
         to_close.push_back(conn);
         deleting_conn_ipport_.erase(conn->ip_port());
         iter = conns_.erase(iter);
@@ -249,24 +249,73 @@ void WorkerThread::DoCronTask() {
 
       // Check keepalive timeout connection
       if (keepalive_timeout_ > 0 && (now.tv_sec - conn->last_interaction().tv_sec > keepalive_timeout_)) {
-        to_timeout.push_back(conn);
-        iter = conns_.erase(iter);
-        LOG(INFO) << "connection " << conn->String() << " keepalive timeout, the keepalive_timeout_ is " << keepalive_timeout_.load();
-        continue;
+        auto dispatchThread = dynamic_cast<net::DispatchThread*>(server_thread_);
+        std::shared_lock blrpop_map_latch(dispatchThread->GetBlockMtx());
+        // check if this conn is blocked by blpop/brpop
+        if (dispatchThread->GetMapFromConnToKeys().find(conn->fd()) !=
+            dispatchThread->GetMapFromConnToKeys().end()) {
+          //this conn is blocked, prolong it's life time.
+          conn->set_last_interaction(now);
+        } else {
+          to_timeout.push_back(conn);
+          iter = conns_.erase(iter);
+          LOG(INFO) << "connection " << conn->String() << " keepalive timeout, the keepalive_timeout_ is "
+                    << keepalive_timeout_.load();
+          continue;
+        }
       }
 
       // Maybe resize connection buffer
       conn->TryResizeBuffer();
-
       ++iter;
     }
   }
-  for (const auto conn : to_close) {
-    CloseFd(conn);
+  /*
+   * How Do we kill a conn correct:
+   * stage 1: stop accept new request(also give up the write back of shooting request's response)
+   *  1.1 remove the fd from epoll and erase it from conns_ to ensure no more request will submit to threadpool
+   *  1.2 add to-close-conn to wait_to_close_conns_
+   * stage 2: ensure there's no other shared_ptr of this conn in pika
+   *  2.1 in async task that exec by TheadPool, a shared_ptr of conn will hold and my case a pipe event to tell the epoll
+   *  to back the response, we must ensure this notification is done before we really close fd(linux will reuse the fd to accept new conn)
+   *  2.2 we must clear all other shared_ptr of this to-close-conn, like the map of blpop/brpop and the map of watchkeys
+   *  2.3 for those to-close-conns that ref count drop to 1, we add them to ready-to-close-conns_
+   * stage 3: after an epoll cycle(let it handle the already-invalid-writeback-notification ), we can safely close the fds of ready_to_close_conns_
+   */
+
+  for (auto& conn : ready_to_close_conns_) {
+    close(conn->fd());
+    server_thread_->handle_->FdClosedHandle(conn->fd(), conn->ip_port());
   }
-  for (const auto conn : to_timeout) {
-    CloseFd(conn);
+  ready_to_close_conns_.clear();
+
+  for (auto conn = wait_to_close_conns_.begin(); conn != wait_to_close_conns_.end();) {
+    if (conn->use_count() == 1) {
+      ready_to_close_conns_.push_back(*conn);
+      conn = wait_to_close_conns_.erase(conn);
+    } else {
+      ++conn;
+    }
+  }
+
+  for (const auto& conn : to_close) {
+    net_multiplexer_->NetDelEvent(conn->fd(), 0);
+    ClearConnsRefAndOtherInfo(conn);
+    wait_to_close_conns_.push_back(conn);
+  }
+  for (const auto& conn : to_timeout) {
+    net_multiplexer_->NetDelEvent(conn->fd(), 0);
+    ClearConnsRefAndOtherInfo(conn);
+    wait_to_close_conns_.push_back(conn);
     server_thread_->handle_->FdTimeoutHandle(conn->fd(), conn->ip_port());
+  }
+}
+
+void WorkerThread::ClearConnsRefAndOtherInfo(const std::shared_ptr<NetConn>& conn) {
+  if (auto dispatcher = dynamic_cast<DispatchThread *>(server_thread_); dispatcher != nullptr ) {
+    //check if this conn disconnected from being blocked by blpop/brpop
+    dispatcher->ClosingConnCheckForBlrPop(std::dynamic_pointer_cast<net::RedisConn>(conn));
+    dispatcher->RemoveWatchKeys(conn);
   }
 }
 
@@ -289,7 +338,8 @@ bool WorkerThread::TryKillConn(const std::string& ip_port) {
   return false;
 }
 
-void WorkerThread::CloseFd(std::shared_ptr<NetConn> conn) {
+void WorkerThread::CloseFd(const std::shared_ptr<NetConn>& conn) {
+  ClearConnsRefAndOtherInfo(conn);
   close(conn->fd());
   server_thread_->handle_->FdClosedHandle(conn->fd(), conn->ip_port());
 }

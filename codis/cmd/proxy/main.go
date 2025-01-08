@@ -112,7 +112,10 @@ Options:
 		if err := config.LoadFromFile(s); err != nil {
 			log.PanicErrorf(err, "load config %s failed", s)
 		}
+		config.ConfigFileName = s
+		log.Warnf("option --config = %s", s)
 	}
+	models.SetMaxSlotNum(config.MaxSlotNum)
 	if s, ok := utils.Argument(d, "--host-admin"); ok {
 		config.HostAdmin = s
 		log.Warnf("option --host-admin = %s", s)
@@ -189,6 +192,8 @@ Options:
 		log.PanicErrorf(err, "create proxy with config file failed\n%s", config)
 	}
 	defer s.Close()
+
+	proxy.RefreshPeriod.Set(config.MaxDelayRefreshTimeInterval.Int64())
 
 	log.Warnf("create proxy with config\n%s", config)
 

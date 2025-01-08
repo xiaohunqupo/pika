@@ -8,7 +8,7 @@
 
 #include <string>
 #include <vector>
-
+#include <memory>
 #include "net/include/bg_thread.h"
 #include "net/include/thread_pool.h"
 
@@ -19,11 +19,10 @@ class PikaClientProcessor {
   int Start();
   void Stop();
   void SchedulePool(net::TaskFunc func, void* arg);
-  void ScheduleBgThreads(net::TaskFunc func, void* arg, const std::string& hash_str);
   size_t ThreadPoolCurQueueSize();
+  size_t ThreadPoolMaxQueueSize();
 
  private:
-  net::ThreadPool* pool_ = nullptr;
-  std::vector<net::BGThread*> bg_threads_;
+  std::unique_ptr<net::ThreadPool> pool_;
 };
 #endif  // PIKA_CLIENT_PROCESSOR_H_

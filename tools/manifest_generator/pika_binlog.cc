@@ -4,21 +4,22 @@
 // of patent rights can be found in the PATENTS file in the same directory.
 
 #include <iostream>
+#include <utility>
 
 #include "include/pika_binlog.h"
 
 #include <sys/time.h>
 
-std::string NewFileName(const std::string name, const uint32_t current) {
+std::string NewFileName(const std::string& name, const uint32_t current) {
   char buf[256];
   snprintf(buf, sizeof(buf), "%s%u", name.c_str(), current);
-  return std::string(buf);
+  return {buf};
 }
 
 /*
  * Version
  */
-Version::Version(pstd::RWFile* save) : pro_num_(0), pro_offset_(0), logic_id_(0), save_(save) { assert(save_); }
+Version::Version(std::shared_ptr<pstd::RWFile> save) : pro_num_(0), pro_offset_(0), logic_id_(0), save_(save) { assert(save_); }
 
 Version::~Version() { StableSave(); }
 
@@ -35,10 +36,10 @@ Status Version::StableSave() {
 
 Status Version::Init() {
   Status s;
-  if (save_->GetData() != nullptr) {
-    memcpy((char*)(&pro_num_), save_->GetData(), sizeof(uint32_t));
-    memcpy((char*)(&pro_offset_), save_->GetData() + 4, sizeof(uint64_t));
-    memcpy((char*)(&logic_id_), save_->GetData() + 12, sizeof(uint64_t));
+  if (save_->GetData()) {
+    memcpy(reinterpret_cast<char*>(&pro_num_), save_->GetData(), sizeof(uint32_t));
+    memcpy(reinterpret_cast<char*>(&pro_offset_), save_->GetData() + 4, sizeof(uint64_t));
+    memcpy(reinterpret_cast<char*>(&logic_id_), save_->GetData() + 12, sizeof(uint64_t));
     return Status::OK();
   } else {
     return Status::Corruption("version init error");
@@ -48,7 +49,7 @@ Status Version::Init() {
 /*
  * Binlog
  */
-Binlog::Binlog(const std::string& binlog_path, const int file_size)
+Binlog::Binlog(std::string  binlog_path, const int file_size)
     : consumer_num_(0),
       version_(nullptr),
       queue_(nullptr),
@@ -56,7 +57,7 @@ Binlog::Binlog(const std::string& binlog_path, const int file_size)
       pro_num_(0),
       pool_(nullptr),
       exit_all_consume_(false),
-      binlog_path_(binlog_path),
+      binlog_path_(std::move(binlog_path)),
       file_size_(file_size) {
   // To intergrate with old version, we don't set mmap file size to 100M;
   // pstd::SetMmapBoundSize(file_size);
@@ -74,26 +75,29 @@ Binlog::Binlog(const std::string& binlog_path, const int file_size)
     std::cout << "Binlog: Manifest file not exist, we create a new one.";
 
     profile = NewFileName(filename, pro_num_);
-    s = pstd::NewWritableFile(profile, &queue_);
+    s = pstd::NewWritableFile(profile, queue_);
     if (!s.ok()) {
       std::cout << "Binlog: new " << filename << " " << s.ToString();
       exit(-1);
     }
-
-    s = pstd::NewRWFile(manifest, &versionfile_);
+    std::unique_ptr<pstd::RWFile> tmp_file;
+    s = pstd::NewRWFile(manifest, tmp_file);
+    versionfile_.reset(tmp_file.release());
     if (!s.ok()) {
       std::cout << "Binlog: new versionfile error " << s.ToString();
       exit(-1);
     }
 
-    version_ = new Version(versionfile_);
+    version_ = std::make_unique<Version>(versionfile_);
     version_->StableSave();
   } else {
     std::cout << "Binlog: Find the exist file.";
 
-    s = pstd::NewRWFile(manifest, &versionfile_);
+    std::unique_ptr<pstd::RWFile> tmp_file;
+    s = pstd::NewRWFile(manifest, tmp_file);
+    versionfile_.reset(tmp_file.release());
     if (s.ok()) {
-      version_ = new Version(versionfile_);
+      version_ = std::make_unique<Version>(versionfile_);
       version_->Init();
       pro_num_ = version_->pro_num_;
 
@@ -105,7 +109,7 @@ Binlog::Binlog(const std::string& binlog_path, const int file_size)
     }
 
     profile = NewFileName(filename, pro_num_);
-    s = pstd::AppendWritableFile(profile, &queue_, version_->pro_offset_);
+    s = pstd::AppendWritableFile(profile, queue_, version_->pro_offset_);
     if (!s.ok()) {
       std::cout << "Binlog: Open file " << profile << " error " << s.ToString();
       exit(-1);
@@ -115,12 +119,7 @@ Binlog::Binlog(const std::string& binlog_path, const int file_size)
   InitLogFile();
 }
 
-Binlog::~Binlog() {
-  delete version_;
-  delete versionfile_;
-
-  delete queue_;
-}
+Binlog::~Binlog() {}
 
 void Binlog::InitLogFile() {
   assert(queue_ != nullptr);
@@ -134,7 +133,7 @@ Status Binlog::GetProducerStatus(uint32_t* filenum, uint64_t* pro_offset, uint64
 
   *filenum = version_->pro_num_;
   *pro_offset = version_->pro_offset_;
-  if (logic_id != nullptr) {
+  if (logic_id) {
     *logic_id = version_->logic_id_;
   }
 
@@ -151,12 +150,12 @@ Status Binlog::Put(const char* item, int len) {
   /* Check to roll log file */
   uint64_t filesize = queue_->Filesize();
   if (filesize > file_size_) {
-    delete queue_;
+    queue_.reset();
     queue_ = nullptr;
 
     pro_num_++;
     std::string profile = NewFileName(filename, pro_num_);
-    pstd::NewWritableFile(profile, &queue_);
+    pstd::NewWritableFile(profile, queue_);
 
     {
       std::lock_guard l(version_->rwlock_);
@@ -274,7 +273,7 @@ Status Binlog::AppendBlank(pstd::WritableFile* file, uint64_t len) {
   if (len % kBlockSize < kHeaderSize) {
     n = 0;
   } else {
-    n = (uint32_t)((len % kBlockSize) - kHeaderSize);
+    n = static_cast<uint32_t>((len % kBlockSize) - kHeaderSize);
   }
 
   char buf[kBlockSize];
@@ -309,7 +308,7 @@ Status Binlog::SetProducerStatus(uint32_t pro_num, uint64_t pro_offset) {
     pro_offset = 0;
   }
 
-  delete queue_;
+  queue_.reset();
 
   std::string init_profile = NewFileName(filename, 0);
   if (pstd::FileExists(init_profile)) {
@@ -321,8 +320,8 @@ Status Binlog::SetProducerStatus(uint32_t pro_num, uint64_t pro_offset) {
     pstd::DeleteFile(profile);
   }
 
-  pstd::NewWritableFile(profile, &queue_);
-  Binlog::AppendBlank(queue_, pro_offset);
+  pstd::NewWritableFile(profile, queue_);
+  Binlog::AppendBlank(queue_.get(), pro_offset);
 
   pro_num_ = pro_num;
 

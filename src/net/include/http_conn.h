@@ -12,6 +12,7 @@
 
 #include "pstd/include/pstd_status.h"
 #include "pstd/include/xdebug.h"
+#include "pstd/include/noncopyable.h"
 
 #include "net/include/net_conn.h"
 #include "net/include/net_define.h"
@@ -23,17 +24,17 @@ class HTTPConn;
 
 class HTTPRequest {
  public:
-  const std::string url() const;
-  const std::string path() const;
-  const std::string query_value(const std::string& field) const;
-  const std::map<std::string, std::string> query_params() const;
-  const std::map<std::string, std::string> postform_params() const;
-  const std::map<std::string, std::string> headers() const;
-  const std::string postform_value(const std::string& field) const;
-  const std::string method() const;
-  const std::string content_type() const;
+  std::string url() const;
+  std::string path() const;
+  std::string query_value(const std::string& field) const;
+  std::map<std::string, std::string> query_params() const;
+  std::map<std::string, std::string> postform_params() const;
+  std::map<std::string, std::string> headers() const;
+  std::string postform_value(const std::string& field) const;
+  std::string method() const;
+  std::string content_type() const;
 
-  const std::string client_ip_port() const;
+  std::string client_ip_port() const;
 
   void Reset();
   void Dump() const;
@@ -50,7 +51,7 @@ class HTTPRequest {
   std::string path_;
   std::string version_;
   std::string content_type_;
-  bool reply_100continue_;
+  bool reply_100continue_{false};
   std::map<std::string, std::string> postform_params_;
   std::map<std::string, std::string> query_params_;
   std::map<std::string, std::string> headers_;
@@ -72,28 +73,28 @@ class HTTPRequest {
     kBodyReceived,
   };
 
-  RequestStatus req_status_;
-  RequestParserStatus parse_status_;
+  RequestStatus req_status_{kNewRequest};
+  RequestParserStatus parse_status_{kHeaderMethod};
 
   char* rbuf_;
-  uint64_t rbuf_pos_;
-  uint64_t remain_recv_len_;
+  uint64_t rbuf_pos_{0};
+  uint64_t remain_recv_len_{0};
 
   ReadStatus ReadData();
   int ParseHeader();
 
   ReadStatus DoRead();
-  bool ParseHeadFromArray(const char* data, const int size);
+  bool ParseHeadFromArray(const char* data, int size);
   bool ParseGetUrl();
   bool ParseHeadLine(const char* data, int line_start, int line_end);
-  bool ParseParameters(const std::string data, size_t line_start = 0);
+  bool ParseParameters(std::string& data, size_t line_start = 0);
 };
 
 class HTTPResponse {
  public:
   void SetStatusCode(int code);
   void SetHeaders(const std::string& key, const std::string& value);
-  void SetHeaders(const std::string& key, const size_t value);
+  void SetHeaders(const std::string& key, size_t value);
   void SetContentLength(uint64_t size);
 
   void Reset();
@@ -112,23 +113,23 @@ class HTTPResponse {
     kSendingBody,
   };
 
-  ResponseStatus resp_status_;
+  ResponseStatus resp_status_{kPrepareHeader};
 
   char* wbuf_;
-  int64_t buf_len_;
-  int64_t wbuf_pos_;
+  int64_t buf_len_{0};
+  int64_t wbuf_pos_{0};
 
-  uint64_t remain_send_len_;
-  bool finished_;
+  uint64_t remain_send_len_{0};
+  bool finished_{true};
 
-  int status_code_;
+  int status_code_{200};
   std::map<std::string, std::string> headers_;
 
   bool Flush();
   bool SerializeHeader();
 };
 
-class HTTPHandles {
+class HTTPHandles : public pstd::noncopyable {
  public:
   // You need implement these handles.
   /*
@@ -161,8 +162,8 @@ class HTTPHandles {
   // Close handle
   virtual void HandleConnClosed() {}
 
-  HTTPHandles() {}
-  virtual ~HTTPHandles() {}
+  HTTPHandles() = default;
+  virtual ~HTTPHandles() = default;
 
  protected:
   /*
@@ -173,22 +174,16 @@ class HTTPHandles {
 
  private:
   friend class HTTPConn;
-
-  /*
-   * No allowed copy and copy assign
-   */
-  HTTPHandles(const HTTPHandles&);
-  void operator=(const HTTPHandles&);
 };
 
 class HTTPConn : public NetConn {
  public:
-  HTTPConn(const int fd, const std::string& ip_port, Thread* sthread, std::shared_ptr<HTTPHandles> handles_,
+  HTTPConn(int fd, const std::string& ip_port, Thread* sthread, std::shared_ptr<HTTPHandles> handles_,
            void* worker_specific_data);
-  ~HTTPConn();
+  ~HTTPConn() override;
 
-  virtual ReadStatus GetRequest() override;
-  virtual WriteStatus SendReply() override;
+  ReadStatus GetRequest() override;
+  WriteStatus SendReply() override;
 
  private:
   friend class HTTPRequest;

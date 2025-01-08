@@ -6,11 +6,11 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include "net/include/net_define.h"
 #include "net/src/net_util.h"
@@ -20,14 +20,7 @@ namespace net {
 
 ServerSocket::ServerSocket(int port, bool is_block)
     : port_(port),
-      send_timeout_(0),
-      recv_timeout_(0),
-      accept_timeout_(0),
-      accept_backlog_(1024),
-      tcp_send_buffer_(0),
-      tcp_recv_buffer_(0),
-      keep_alive_(false),
-      listening_(false),
+      
       is_block_(is_block) {}
 
 ServerSocket::~ServerSocket() { Close(); }
@@ -57,7 +50,7 @@ int ServerSocket::Listen(const std::string& bind_ip) {
 
   fcntl(sockfd_, F_SETFD, fcntl(sockfd_, F_GETFD) | FD_CLOEXEC);
 
-  ret = bind(sockfd_, (struct sockaddr*)&servaddr_, sizeof(servaddr_));
+  ret = bind(sockfd_, reinterpret_cast<struct sockaddr*>(&servaddr_), sizeof(servaddr_));
   if (ret < 0) {
     return kBindError;
   }
@@ -67,7 +60,7 @@ int ServerSocket::Listen(const std::string& bind_ip) {
   }
   listening_ = true;
 
-  if (is_block_ == false) {
+  if (!is_block_) {
     SetNonBlock();
   }
   return kSuccess;

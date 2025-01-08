@@ -6,10 +6,13 @@ package proxy
 import (
 	"bytes"
 	"hash/crc32"
+	"strconv"
 	"strings"
+	"sync"
 
 	"pika/codis/v2/pkg/proxy/redis"
 	"pika/codis/v2/pkg/utils/errors"
+	"pika/codis/v2/pkg/utils/log"
 )
 
 var charmap [256]byte
@@ -44,19 +47,28 @@ func (f OpFlag) IsMasterOnly() bool {
 	return (f & mask) != 0
 }
 
+func (f OpFlag) IsQuick() bool {
+	return (f & FlagQuick) != 0
+}
+
 type OpInfo struct {
 	Name string
 	Flag OpFlag
 }
 
 const (
-	FlagWrite = 1 << iota
+	FlagWrite OpFlag = 1 << iota
 	FlagMasterOnly
 	FlagMayWrite
 	FlagNotAllow
+	FlagQuick
+	FlagSlow
 )
 
-var opTable = make(map[string]OpInfo, 256)
+var (
+	opTableLock sync.RWMutex
+	opTable     = make(map[string]OpInfo, 256)
+)
 
 func init() {
 	for _, i := range []OpInfo{
@@ -84,8 +96,8 @@ func init() {
 		{"DISCARD", FlagNotAllow},
 		{"DUMP", 0},
 		{"ECHO", 0},
-		{"EVAL", FlagWrite},
-		{"EVALSHA", FlagWrite},
+		{"EVAL", FlagNotAllow},
+		{"EVALSHA", FlagNotAllow},
 		{"EXEC", FlagNotAllow},
 		{"EXISTS", 0},
 		{"EXPIRE", FlagWrite},
@@ -149,7 +161,7 @@ func init() {
 		{"PFADD", FlagWrite},
 		{"PFCOUNT", 0},
 		{"PFDEBUG", FlagWrite},
-		{"PFMERGE", FlagWrite},
+		{"PFMERGE", FlagNotAllow},
 		{"PFSELFTEST", 0},
 		{"PING", 0},
 		{"POST", FlagNotAllow},
@@ -171,7 +183,7 @@ func init() {
 		{"RESTORE-ASKING", FlagWrite | FlagNotAllow},
 		{"ROLE", 0},
 		{"RPOP", FlagWrite},
-		{"RPOPLPUSH", FlagWrite},
+		{"RPOPLPUSH", FlagNotAllow},
 		{"RPUSH", FlagWrite},
 		{"RPUSHX", FlagWrite},
 		{"SADD", FlagWrite},
@@ -179,7 +191,7 @@ func init() {
 		{"SCAN", FlagMasterOnly | FlagNotAllow},
 		{"SCARD", 0},
 		{"SCRIPT", FlagNotAllow},
-		{"SDIFF", 0},
+		{"SDIFF", FlagNotAllow},
 		{"SDIFFSTORE", FlagWrite},
 		{"SELECT", 0},
 		{"SET", FlagWrite},
@@ -188,8 +200,8 @@ func init() {
 		{"SETNX", FlagWrite},
 		{"SETRANGE", FlagWrite},
 		{"SHUTDOWN", FlagNotAllow},
-		{"SINTER", 0},
-		{"SINTERSTORE", FlagWrite},
+		{"SINTER", FlagNotAllow},
+		{"SINTERSTORE", FlagNotAllow},
 		{"SISMEMBER", 0},
 		{"SLAVEOF", FlagNotAllow},
 		{"SLOTSCHECK", FlagNotAllow},
@@ -216,7 +228,7 @@ func init() {
 		{"SLOTSSCAN", FlagMasterOnly},
 		{"SLOWLOG", FlagNotAllow},
 		{"SMEMBERS", 0},
-		{"SMOVE", FlagWrite},
+		{"SMOVE", FlagNotAllow},
 		{"SORT", FlagWrite},
 		{"SPOP", FlagWrite},
 		{"SRANDMEMBER", 0},
@@ -225,9 +237,10 @@ func init() {
 		{"STRLEN", 0},
 		{"SUBSCRIBE", FlagNotAllow},
 		{"SUBSTR", 0},
-		{"SUNION", 0},
-		{"SUNIONSTORE", FlagWrite},
+		{"SUNION", FlagNotAllow},
+		{"SUNIONSTORE", FlagNotAllow},
 		{"SYNC", FlagNotAllow},
+		{"PCONFIG", 0},
 		{"TIME", FlagNotAllow},
 		{"TOUCH", FlagWrite},
 		{"TTL", 0},
@@ -240,7 +253,7 @@ func init() {
 		{"ZCARD", 0},
 		{"ZCOUNT", 0},
 		{"ZINCRBY", FlagWrite},
-		{"ZINTERSTORE", FlagWrite},
+		{"ZINTERSTORE", FlagNotAllow},
 		{"ZLEXCOUNT", 0},
 		{"ZRANGE", 0},
 		{"ZRANGEBYLEX", 0},
@@ -256,7 +269,7 @@ func init() {
 		{"ZREVRANK", 0},
 		{"ZSCAN", FlagMasterOnly},
 		{"ZSCORE", 0},
-		{"ZUNIONSTORE", FlagWrite},
+		{"ZUNIONSTORE", FlagNotAllow},
 	} {
 		opTable[i.Name] = i
 	}
@@ -288,6 +301,10 @@ func getOpInfo(multi []*redis.Resp) (string, OpFlag, error) {
 		}
 	}
 	op = upper[:len(op)]
+
+	opTableLock.RLock()
+	defer opTableLock.RUnlock()
+
 	if r, ok := opTable[string(op)]; ok {
 		return r.Name, r.Flag, nil
 	}
@@ -317,4 +334,95 @@ func getHashKey(multi []*redis.Resp, opstr string) []byte {
 		return multi[index].Value
 	}
 	return nil
+}
+
+func getWholeCmd(multi []*redis.Resp, cmd []byte) int {
+	var (
+		index = 0
+		bytes = 0
+	)
+	for i := 0; i < len(multi); i++ {
+		if index < len(cmd) {
+			index += copy(cmd[index:], multi[i].Value)
+			if i < len(multi)-i {
+				index += copy(cmd[index:], []byte(" "))
+			}
+		}
+		bytes += len(multi[i].Value)
+
+		if i == len(multi)-1 && index == len(cmd) {
+			more := []byte("... " + strconv.Itoa(len(multi)) + " elements " + strconv.Itoa(bytes) + " bytes.")
+			index = len(cmd) - len(more)
+			if index < 0 {
+				index = 0
+			}
+			index += copy(cmd[index:], more)
+			break
+		}
+	}
+	return index
+}
+
+func setCmdListFlag(cmdlist string, flag OpFlag) error {
+	reverseFlag := FlagSlow
+	flagString := "FlagQuick"
+	if flag&FlagSlow != 0 {
+		reverseFlag = FlagQuick
+		flagString = "FlagSlow"
+	}
+
+	opTableLock.Lock()
+	defer opTableLock.Unlock()
+
+	for _, r := range opTable {
+		r.Flag = r.Flag &^ flag
+		opTable[r.Name] = r
+	}
+	if len(cmdlist) == 0 {
+		return nil
+	}
+	cmdlist = strings.ToUpper(cmdlist)
+	cmds := strings.Split(cmdlist, ",")
+	for i := 0; i < len(cmds); i++ {
+		if r, ok := opTable[strings.TrimSpace(cmds[i])]; ok {
+			log.Infof("before setCmdListFlag: r.Name[%s], r.Flag[%d]", r.Name, r.Flag)
+			if r.Flag&reverseFlag == 0 {
+				r.Flag = r.Flag | flag
+				opTable[strings.TrimSpace(cmds[i])] = r
+				log.Infof("after setCmdListFlag: r.Name[%s], r.Flag[%d]", r.Name, r.Flag)
+			} else {
+				log.Warnf("cmd[%s] is %s command.", cmds[i], flagString)
+				return errors.Errorf("cmd[%s] is %s command.", cmds[i], flagString)
+			}
+		} else {
+			log.Warnf("can not find [%s] command.", cmds[i])
+			return errors.Errorf("can not find [%s] command.", cmds[i])
+		}
+	}
+	return nil
+}
+
+func getCmdFlag() *redis.Resp {
+	var array = make([]*redis.Resp, 0, 32)
+	const mask = FlagQuick | FlagSlow
+
+	opTableLock.RLock()
+	defer opTableLock.RUnlock()
+
+	for _, r := range opTable {
+		if r.Flag&mask != 0 {
+			retStr := r.Name + " : Flag[" + strconv.Itoa(int(r.Flag)) + "]"
+
+			if r.Flag&FlagQuick != 0 {
+				retStr += ", FlagQuick"
+			}
+
+			if r.Flag&FlagSlow != 0 {
+				retStr += ", FlagSlow"
+			}
+
+			array = append(array, redis.NewBulkBytes([]byte(retStr)))
+		}
+	}
+	return redis.NewArray(array)
 }

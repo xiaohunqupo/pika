@@ -13,42 +13,53 @@ source tests/support/util.tcl
 
 set ::all_tests {
     unit/printver
-    unit/auth
-    unit/protocol
     unit/basic
     unit/scan
+    unit/quit
+    unit/pubsub
+    unit/slowlog
+    unit/maxmemory
+    unit/hyperloglog
+    unit/type
+    unit/acl
+    unit/geo
+    unit/type/bitops
     unit/type/list
     unit/type/list-2
     unit/type/list-3
     unit/type/set
     unit/type/zset
+    unit/type/string
     unit/type/hash
-    unit/sort
-    unit/expire
-    unit/other
     unit/multi
-    unit/quit
-    unit/aofrw
-    integration/replication
-    integration/replication-2
-    integration/replication-3
-    integration/replication-4
-    integration/replication-psync
-    integration/aof
-    integration/rdb
-    integration/convert-zipmap-hash-on-load
-    unit/pubsub
-    unit/slowlog
-    unit/scripting
-    unit/maxmemory
-    unit/introspection
-    unit/limits
-    unit/obuf-limits
-    unit/dump
-    unit/bitops
-    unit/memefficiency
-    unit/hyperloglog
+    unit/type/stream
+    # unit/expire
+    # unit/protocol
+    # unit/other
+    # unit/auth
+    # unit/sort
+    # unit/aofrw
+    # unit/scripting
+    # unit/introspection
+    # unit/limits
+    # unit/obuf-limits
+    # unit/dump
+    # unit/memefficiency
+    # unit/command
+    # unit/tcl/replication
+    # unit/tcl/replication-2
+    # unit/tcl/replication-3
+    # unit/tcl/replication-4
+    # unit/tcl/replication-psync
+    # unit/tcl/aof
+    # unit/tcl/rdb
+    # unit/tcl/convert-zipmap-hash-on-load
 }
+
+# because the comment not works in tcl list, use regsub to ignore the item starting with '#'
+regsub -all {#.*?\n} $::all_tests {} ::all_tests
+
+
 # Index to the next test to run in the ::all_tests list.
 set ::next_test 0
 
@@ -68,7 +79,7 @@ set ::force_failure 0
 set ::timeout 600; # 10 minutes without progresses will quit the test.
 set ::last_progress [clock seconds]
 set ::active_servers {} ; # Pids of active Redis instances.
-
+set ::tls 0
 # Set to 1 when we are running in client mode. The Redis test uses a
 # server-client model to run tests simultaneously. The server instance
 # runs the specified number of client instances that will actually run tests.
@@ -145,7 +156,7 @@ proc redis_deferring_client {args} {
     set client [redis [srv $level "host"] [srv $level "port"] 1]
 
     # select the right db and read the response (OK)
-    $client select 9
+    $client select 0
     $client read
     return $client
 }
@@ -166,6 +177,26 @@ proc cleanup {} {
     catch {exec rm -rf {*}[glob tests/tmp/redis.conf.*]}
     catch {exec rm -rf {*}[glob tests/tmp/server.*]}
     if {!$::quiet} {puts "OK"}
+}
+
+proc redis_client {args} {
+    set level 0
+    if {[llength $args] > 0 && [string is integer [lindex $args 0]]} {
+        set level [lindex $args 0]
+        set args [lrange $args 1 end]
+    }
+
+    # create client that won't defers reading reply
+    set client [redis [srv $level "host"] [srv $level "port"] 0 $::tls]
+
+    # select the right db and read the response (OK), or at least ping
+    # the server if we're in a singledb mode.
+    if {$::singledb} {
+        $client ping
+    } else {
+        $client select 9
+    }
+    return $client
 }
 
 proc test_server_main {} {

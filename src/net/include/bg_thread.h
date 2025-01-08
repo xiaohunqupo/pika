@@ -8,7 +8,7 @@
 
 #include <atomic>
 #include <queue>
-
+#include <functional>
 #include "net/include/net_thread.h"
 
 #include "pstd/include/pstd_mutex.h"
@@ -26,14 +26,14 @@ struct TimerItem {
 
 class BGThread final : public Thread {
  public:
-  explicit BGThread(int full = 100000) : Thread::Thread(), full_(full) {}
+  explicit BGThread(int full = 100000) :  full_(full) {}
 
-  virtual ~BGThread() {
+  ~BGThread() override {
     // call virtual in destructor, BGThread must be final
     StopThread();
   }
 
-  virtual int StopThread() override {
+  int StopThread() override {
     should_stop_ = true;
     rsignal_.notify_one();
     wsignal_.notify_one();
@@ -41,7 +41,7 @@ class BGThread final : public Thread {
   }
 
   void Schedule(void (*function)(void*), void* arg);
-
+  void Schedule(void (*function)(void*), void* arg, std::function<void()>& call_back);
   /*
    * timeout is in millionsecond
    */
@@ -52,20 +52,29 @@ class BGThread final : public Thread {
   void SwallowReadyTasks();
 
  private:
-  struct BGItem {
+  class BGItem {
+   public:
     void (*function)(void*);
     void* arg;
+    //dtor_call_back is an optional call back fun
+    std::function<void()> dtor_call_back;
     BGItem(void (*_function)(void*), void* _arg) : function(_function), arg(_arg) {}
+    BGItem(void (*_function)(void*), void* _arg, std::function<void()>& _dtor_call_back) : function(_function), arg(_arg), dtor_call_back(_dtor_call_back) {}
+    ~BGItem() {
+      if (dtor_call_back) {
+        dtor_call_back();
+      }
+    }
   };
 
-  std::queue<BGItem> queue_;
+  std::queue<std::unique_ptr<BGItem>> queue_;
   std::priority_queue<TimerItem> timer_queue_;
 
   size_t full_;
   pstd::Mutex mu_;
   pstd::CondVar rsignal_;
   pstd::CondVar wsignal_;
-  virtual void* ThreadMain() override;
+  void* ThreadMain() override;
 };
 
 }  // namespace net

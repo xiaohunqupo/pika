@@ -29,29 +29,32 @@ class HolyThread : public ServerThread {
              const ServerHandle* handle = nullptr, bool async = true);
   HolyThread(const std::set<std::string>& bind_ips, int port, ConnFactory* conn_factory, int cron_interval = 0,
              const ServerHandle* handle = nullptr, bool async = true);
-  virtual ~HolyThread();
+  ~HolyThread() override;
 
-  virtual int StartThread() override;
+  int StartThread() override;
 
-  virtual int StopThread() override;
+  int StopThread() override;
 
-  virtual void set_keepalive_timeout(int timeout) override { keepalive_timeout_ = timeout; }
+  void set_thread_name(const std::string& name) override { Thread::set_thread_name(name); }
 
-  virtual int conn_num() const override;
+  void set_keepalive_timeout(int timeout) override { keepalive_timeout_ = timeout; }
 
-  virtual std::vector<ServerThread::ConnInfo> conns_info() const override;
+  int conn_num() const override;
 
-  virtual std::shared_ptr<NetConn> MoveConnOut(int fd) override;
+  std::vector<ServerThread::ConnInfo> conns_info() const override;
 
-  virtual void MoveConnIn(std::shared_ptr<NetConn> conn, const NotifyType& type) override {}
+  std::shared_ptr<NetConn> MoveConnOut(int fd) override;
 
-  virtual void KillAllConns() override;
+  void MoveConnIn(std::shared_ptr<NetConn> conn, const NotifyType& type) override {}
 
-  virtual bool KillConn(const std::string& ip_port) override;
+  void KillAllConns() override;
+
+  bool KillConn(const std::string& ip_port) override;
 
   virtual std::shared_ptr<NetConn> get_conn(int fd);
 
   void ProcessNotifyEvents(const net::NetFiredEvent* pfe) override;
+  void Cleanup();
 
  private:
   mutable pstd::RWMutex rwlock_; /* For external statistics */
@@ -71,8 +74,7 @@ class HolyThread : public ServerThread {
   void HandleNewConn(int connfd, const std::string& ip_port) override;
   void HandleConnEvent(NetFiredEvent* pfe) override;
 
-  void CloseFd(std::shared_ptr<NetConn> conn);
-  void Cleanup();
+  void CloseFd(const std::shared_ptr<NetConn>& conn);
 };  // class HolyThread
 
 }  // namespace net

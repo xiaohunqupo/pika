@@ -26,8 +26,8 @@ class PbConn : public NetConn {
     std::queue<std::string> queue_;
     size_t item_pos_;
   };
-  PbConn(const int fd, const std::string& ip_port, Thread* thread, NetMultiplexer* net_mpx = nullptr);
-  virtual ~PbConn();
+  PbConn(int fd, const std::string& ip_port, Thread* thread, NetMultiplexer* net_mpx = nullptr);
+  ~PbConn() override;
 
   ReadStatus GetRequest() override;
   WriteStatus SendReply() override;
@@ -35,19 +35,19 @@ class PbConn : public NetConn {
   int WriteResp(const std::string& resp) override;
   void NotifyWrite();
   void NotifyClose();
-  void set_is_reply(const bool reply) override;
+  void set_is_reply(bool reply) override;
   bool is_reply() override;
   /*
    * The Variable need by read the buf,
    * We allocate the memory when we start the server
    */
-  uint32_t header_len_;
+  uint32_t header_len_{static_cast<uint32_t>(-1)};
   char* rbuf_;
-  uint32_t cur_pos_;
-  uint32_t rbuf_len_;
-  int32_t remain_packet_len_;
+  uint32_t cur_pos_{0};
+  uint32_t rbuf_len_{0};
+  int32_t remain_packet_len_{0};
 
-  ConnStatus connStatus_;
+  ConnStatus connStatus_{kHeader};
 
  protected:
   // NOTE: if this function return non 0, the the server will close this connection
@@ -82,7 +82,7 @@ class PbConn : public NetConn {
   pstd::Mutex resp_mu_;
   WriteBuf write_buf_;
   pstd::Mutex is_reply_mu_;
-  int64_t is_reply_;
+  int64_t is_reply_{0};
   virtual void BuildInternalTag(const std::string& resp, std::string* tag);
 };
 

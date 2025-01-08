@@ -6,14 +6,16 @@
 #ifndef SRC_REDIS_HYPERLOGLOG_H_
 #define SRC_REDIS_HYPERLOGLOG_H_
 
+#include <cstdint>
 #include <iostream>
+#include <memory>
 #include <string>
 
 namespace storage {
 
 class HyperLogLog {
  public:
-  HyperLogLog(uint8_t precision, std::string origin_resiter);
+  HyperLogLog(uint8_t precision, std::string origin_register);
   ~HyperLogLog();
 
   double Estimate() const;
@@ -22,14 +24,14 @@ class HyperLogLog {
   double Alpha() const;
   uint8_t Nctz(uint32_t x, int b);
 
-  std::string Add(const char* str, uint32_t len);
+  std::string Add(const char* value, uint32_t len);
   std::string Merge(const HyperLogLog& hll);
 
  protected:
   uint32_t m_ = 0;  // register bit width
   uint32_t b_ = 0;  // regieter size
   double alpha_ = 0;
-  char* register_ = nullptr;  // register;
+  std::unique_ptr<char[]> register_;
 };
 
 }  // namespace storage

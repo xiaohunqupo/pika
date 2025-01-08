@@ -5,6 +5,8 @@
 
 #include <glog/logging.h>
 
+#include <utility>
+
 #include "pstd/include/pstd_coding.h"
 #include "pstd/include/pstd_string.h"
 
@@ -17,7 +19,7 @@
 extern PikaPort* g_pika_port;
 
 MasterConn::MasterConn(int fd, std::string ip_port, void* worker_specific_data)
-    : NetConn(fd, ip_port, nullptr),
+    : NetConn(fd, std::move(ip_port), nullptr),
       rbuf_(nullptr),
       rbuf_len_(0),
       rbuf_size_(REDIS_IOBUF_LEN),
@@ -102,7 +104,7 @@ int32_t MasterConn::GetNextNum(const std::string& content, int32_t left_pos, int
   //            012 3
   // num range [left_pos + 1, right_pos - 2]
   assert(left_pos < right_pos);
-  if (pstd::string2int(content.data() + left_pos + 1, right_pos - left_pos - 2, value)) {
+  if (pstd::string2int(content.data() + left_pos + 1, right_pos - left_pos - 2, value) != 0) {
     return 0;
   }
   return -1;
@@ -113,7 +115,8 @@ net::ReadStatus MasterConn::ParseRedisRESPArray(const std::string& content, net:
   int32_t pos = 0;
   int32_t next_parse_pos = 0;
   int32_t content_len = content.size();
-  long multibulk_len = 0, bulk_len = 0;
+  long multibulk_len = 0;
+  long bulk_len = 0;
   if (content.empty() || content[0] != '*') {
     LOG(INFO) << "Content empty() or the first character of the redis protocol string not equal '*'";
     return net::kParseError;
@@ -133,7 +136,7 @@ net::ReadStatus MasterConn::ParseRedisRESPArray(const std::string& content, net:
   //               012 3 4567 8
 
   argv->clear();
-  while (multibulk_len) {
+  while (multibulk_len != 0) {
     if (content[next_parse_pos] != '$') {
       LOG(INFO) << "The first charactor of the RESP type element not equal '$'";
       return net::kParseError;
@@ -272,10 +275,44 @@ bool MasterConn::ProcessBinlogData(const net::RedisCmdArgsType& argv, const Port
   if (1 < argv.size()) {
     key = argv[1];
   }
-  int ret = g_pika_port->SendRedisCommand(binlog_item.content(), key);
+
+  std::string command;
+  if (argv[0] == "pksetexat"){
+    //struct timeval now;
+    std::string temp("");
+    std::string time_out("");
+    std::string time_cmd("");
+    int start;
+    int old_time_size;
+    int new_time_size;
+    int diff;
+    temp = argv[2];
+    //gettimeofday(&now, NULL);
+    unsigned long int sec= time(NULL);
+    unsigned long int tot;
+    tot = std::stol(temp) - sec;
+    time_out = std::to_string(tot);
+    
+    command = binlog_item.content();
+    command.erase(0,4);
+    command.replace(0, 13, "*4\r\n$5\r\nsetex");
+    //"*4\r\n$5\r\nsetex\r\n$48\r\n1691478611637921200018685540810_4932190141418052\r\n$10\r\n1691483848\r\n$1681\r\n(\265/\375`\332\024=4"}}
+    start = 13 + 3 + std::to_string(key.size()).size() + 2 + key.size() +3;
+    old_time_size = std::to_string(temp.size()).size() + 2 + temp.size();
+    new_time_size = std::to_string(time_out.size()).size() + 2 + time_out.size();
+    diff =  old_time_size - new_time_size;
+    command.erase(start, diff);
+    time_cmd = std::to_string(time_out.size()) + "\r\n" + time_out;
+    command.replace(start, new_time_size, time_cmd);
+  } else {
+    command = binlog_item.content();
+  }
+  
+  int ret = g_pika_port->SendRedisCommand(command, key);
   if (ret != 0) {
-    LOG(WARNING) << "send redis command:" << binlog_item.ToString() << ", ret:" << ret;
+    LOG(WARNING) << "send redis command:" << command << ", ret:" << ret;
   }
 
   return true;
 }
+

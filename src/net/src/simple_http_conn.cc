@@ -4,9 +4,9 @@
 // of patent rights can be found in the PATENTS file in the same directory.
 
 #include "net/include/simple_http_conn.h"
-#include <limits.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <climits>
+#include <cstdio>
+#include <cstdlib>
 
 #include <algorithm>
 #include <string>
@@ -141,8 +141,10 @@ bool Request::ParseGetUrl() {
 
 // Parse query parameter from GET url or POST application/x-www-form-urlencoded
 // format: key1=value1&key2=value2&key3=value3
-bool Request::ParseParameters(const std::string data, size_t line_start, bool from_url) {
-  size_t pre = line_start, mid, end;
+bool Request::ParseParameters(const std::string& data, size_t line_start, bool from_url) {
+  size_t pre = line_start;
+  size_t mid;
+  size_t end;
   while (pre < data.size()) {
     mid = data.find('=', pre);
     if (mid == std::string::npos) {
@@ -195,10 +197,7 @@ bool Request::ParseHeadFromArray(const char* data, const int size) {
   }
 
   // Parse query parameter from url
-  if (!ParseGetUrl()) {
-    return false;
-  }
-  return true;
+  return ParseGetUrl();
 }
 
 bool Request::ParseBodyFromArray(const char* data, const int size) {
@@ -240,7 +239,7 @@ int Response::SerializeHeaderToArray(char* data, size_t size) {
 
   // Serialize header
   if (headers_.find("Content-Length") == headers_.end()) {
-    SetHeaders("Content-Length", body_.size());
+    SetHeaders("Content-Length", static_cast<int32_t>(body_.size()));
   }
   for (auto& line : headers_) {
     ret = snprintf(data + serial_size, size - serial_size, "%s: %s\r\n", line.first.c_str(), line.second.c_str());
@@ -261,13 +260,13 @@ int Response::SerializeHeaderToArray(char* data, size_t size) {
 // Serialize body begin from 'pos', return the new pos
 int Response::SerializeBodyToArray(char* data, size_t size, int* pos) {
   // Serialize body
-  int actual = size;
+  size_t actual = size;
   if (body_.size() - *pos < size) {
     actual = body_.size() - *pos;
   }
   memcpy(data, body_.data() + *pos, actual);
-  *pos += actual;
-  return actual;
+  *pos += static_cast<int32_t>(actual);
+  return static_cast<int32_t>(actual);
 }
 
 void Response::SetStatusCode(int code) {
@@ -278,14 +277,8 @@ void Response::SetStatusCode(int code) {
 }
 
 SimpleHTTPConn::SimpleHTTPConn(const int fd, const std::string& ip_port, Thread* thread)
-    : NetConn(fd, ip_port, thread),
-      conn_status_(kHeader),
-      rbuf_pos_(0),
-      wbuf_len_(0),
-      wbuf_pos_(0),
-      header_len_(0),
-      remain_packet_len_(0),
-      response_pos_(-1) {
+    : NetConn(fd, ip_port, thread)
+      {
   rbuf_ = reinterpret_cast<char*>(malloc(sizeof(char) * kHTTPMaxMessage));
   wbuf_ = reinterpret_cast<char*>(malloc(sizeof(char) * kHTTPMaxMessage));
   request_ = new Request();
@@ -304,7 +297,7 @@ SimpleHTTPConn::~SimpleHTTPConn() {
  */
 bool SimpleHTTPConn::BuildRequestHeader() {
   request_->Clear();
-  if (!request_->ParseHeadFromArray(rbuf_, header_len_)) {
+  if (!request_->ParseHeadFromArray(rbuf_, static_cast<int32_t>(header_len_))) {
     return false;
   }
   auto iter = request_->headers.find("content-length");
@@ -312,7 +305,7 @@ bool SimpleHTTPConn::BuildRequestHeader() {
     remain_packet_len_ = 0;
   } else {
     long tmp = 0;
-    if (pstd::string2int(iter->second.data(), iter->second.size(), &tmp)) {
+    if (pstd::string2int(iter->second.data(), iter->second.size(), &tmp) != 0) {
       remain_packet_len_ = tmp;
     } else {
       remain_packet_len_ = 0;
@@ -326,7 +319,7 @@ bool SimpleHTTPConn::BuildRequestHeader() {
 }
 
 bool SimpleHTTPConn::AppendRequestBody() {
-  return request_->ParseBodyFromArray(rbuf_ + header_len_, rbuf_pos_ - header_len_);
+  return request_->ParseBodyFromArray(rbuf_ + header_len_, static_cast<int32_t>(rbuf_pos_ - header_len_));
 }
 
 void SimpleHTTPConn::HandleMessage() {
@@ -358,14 +351,16 @@ ReadStatus SimpleHTTPConn::GetRequest() {
             return kReadError;
           }
 
-          std::string sign = request_->headers.count("expect") ? request_->headers.at("expect") : "";
+          std::string sign = request_->headers.count("expect") != 0U ? request_->headers.at("expect") : "";
           if (sign == "100-continue" || sign == "100-Continue") {
             // Reply 100 Continue, then receive body
             response_->Clear();
             response_->SetStatusCode(100);
             set_is_reply(true);
             conn_status_ = kPacket;
-            if (remain_packet_len_ > 0) return kReadHalf;
+            if (remain_packet_len_ > 0) { 
+              return kReadHalf;
+            }
           }
           conn_status_ = kPacket;
         }

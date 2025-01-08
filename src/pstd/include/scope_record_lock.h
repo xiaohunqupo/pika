@@ -8,56 +8,50 @@
 
 #include <algorithm>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "pstd/include/lock_mgr.h"
+#include "pstd/include/noncopyable.h"
 #include "rocksdb/slice.h"
 
-namespace pstd {
-
-namespace lock {
+namespace pstd::lock {
 
 using Slice = rocksdb::Slice;
 
-class ScopeRecordLock {
+class ScopeRecordLock final : public pstd::noncopyable {
  public:
-  ScopeRecordLock(LockMgr* lock_mgr, const Slice& key) : lock_mgr_(lock_mgr), key_(key) {
+  ScopeRecordLock(const std::shared_ptr<LockMgr>& lock_mgr, const Slice& key) : lock_mgr_(lock_mgr), key_(key) {
     lock_mgr_->TryLock(key_.ToString());
   }
   ~ScopeRecordLock() { lock_mgr_->UnLock(key_.ToString()); }
 
  private:
-  LockMgr* const lock_mgr_;
+  std::shared_ptr<LockMgr> const lock_mgr_;
   Slice key_;
-  ScopeRecordLock(const ScopeRecordLock&);
-  void operator=(const ScopeRecordLock&);
 };
 
-class MultiScopeRecordLock {
+class MultiScopeRecordLock final : public pstd::noncopyable {
  public:
-  MultiScopeRecordLock(LockMgr* lock_mgr, const std::vector<std::string>& keys);
+  MultiScopeRecordLock(const std::shared_ptr<LockMgr>& lock_mgr, const std::vector<std::string>& keys);
   ~MultiScopeRecordLock();
 
  private:
-  LockMgr* const lock_mgr_;
+  std::shared_ptr<LockMgr> const lock_mgr_;
   std::vector<std::string> keys_;
-  MultiScopeRecordLock(const MultiScopeRecordLock&);
-  void operator=(const MultiScopeRecordLock&);
 };
 
-class MultiRecordLock {
+class MultiRecordLock : public noncopyable {
  public:
-  explicit MultiRecordLock(LockMgr* lock_mgr) : lock_mgr_(lock_mgr) {}
-  ~MultiRecordLock() {}
+  explicit MultiRecordLock(const std::shared_ptr<LockMgr>& lock_mgr) : lock_mgr_(lock_mgr) {}
+  ~MultiRecordLock() = default;
+
   void Lock(const std::vector<std::string>& keys);
   void Unlock(const std::vector<std::string>& keys);
 
  private:
-  LockMgr* const lock_mgr_;
-  MultiRecordLock(const MultiRecordLock&);
-  void operator=(const MultiRecordLock&);
+  std::shared_ptr<LockMgr> const lock_mgr_;
 };
 
-}  // namespace lock
-}  // namespace pstd
+}  // namespace pstd::lock
 #endif  // __SRC_SCOPE_RECORD_LOCK_H__

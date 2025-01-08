@@ -8,8 +8,10 @@
 #include "pstd/include/pstd_string.h"
 
 #include "include/pika_conf.h"
+#include "include/pika_slot_command.h"
+#include "include/pika_cache.h"
 
-extern PikaConf* g_pika_conf;
+extern std::unique_ptr<PikaConf> g_pika_conf;
 
 void HDelCmd::DoInitial() {
   if (!CheckArg(argv_.size())) {
@@ -17,22 +19,32 @@ void HDelCmd::DoInitial() {
     return;
   }
   key_ = argv_[1];
-  PikaCmdArgsType::iterator iter = argv_.begin();
+  auto iter = argv_.begin();
   iter++;
   iter++;
   fields_.assign(iter, argv_.end());
-  return;
 }
 
-void HDelCmd::Do(std::shared_ptr<Partition> partition) {
-  int32_t num = 0;
-  rocksdb::Status s = partition->db()->HDel(key_, fields_, &num);
-  if (s.ok() || s.IsNotFound()) {
-    res_.AppendInteger(num);
+void HDelCmd::Do() {
+  s_ = db_->storage()->HDel(key_, fields_, &deleted_);
+
+  if (s_.ok() || s_.IsNotFound()) {
+    res_.AppendInteger(deleted_);
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
   } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
   }
-  return;
+}
+
+void HDelCmd::DoThroughDB() {
+  Do();
+}
+
+void HDelCmd::DoUpdateCache() {
+  if (s_.ok() && deleted_ > 0) {
+    db_->cache()->HDel(key_, fields_);
+  }
 }
 
 void HSetCmd::DoInitial() {
@@ -43,18 +55,33 @@ void HSetCmd::DoInitial() {
   key_ = argv_[1];
   field_ = argv_[2];
   value_ = argv_[3];
-  return;
 }
 
-void HSetCmd::Do(std::shared_ptr<Partition> partition) {
+void HSetCmd::Do() {
   int32_t ret = 0;
-  rocksdb::Status s = partition->db()->HSet(key_, field_, value_, &ret);
-  if (s.ok()) {
+  s_ = db_->storage()->HSet(key_, field_, value_, &ret);
+  if (s_.ok()) {
     res_.AppendContent(":" + std::to_string(ret));
+    AddSlotKey("h", key_, db_);
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
   } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
   }
-  return;
+}
+
+void HSetCmd::DoThroughDB() {
+  Do();
+}
+
+void HSetCmd::DoUpdateCache() {
+  // HSetIfKeyExist() can void storing large key, but IsTooLargeKey() can speed up it
+  if (IsTooLargeKey(g_pika_conf->max_key_size_in_cache())) {
+    return;
+  }
+  if (s_.ok()) {
+    db_->cache()->HSetIfKeyExist(key_, field_, value_);
+  }
 }
 
 void HGetCmd::DoInitial() {
@@ -64,19 +91,47 @@ void HGetCmd::DoInitial() {
   }
   key_ = argv_[1];
   field_ = argv_[2];
-  return;
 }
 
-void HGetCmd::Do(std::shared_ptr<Partition> partition) {
+void HGetCmd::Do() {
   std::string value;
-  rocksdb::Status s = partition->db()->HGet(key_, field_, &value);
+  s_ = db_->storage()->HGet(key_, field_, &value);
+  if (s_.ok()) {
+    res_.AppendStringLenUint64(value.size());
+    res_.AppendContent(value);
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
+  } else if (s_.IsNotFound()) {
+    res_.AppendContent("$-1");
+  } else {
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
+  }
+}
+
+void HGetCmd::ReadCache() {
+  std::string value;
+  auto s = db_->cache()->HGet(key_, field_, &value);
   if (s.ok()) {
     res_.AppendStringLen(value.size());
     res_.AppendContent(value);
   } else if (s.IsNotFound()) {
-    res_.AppendContent("$-1");
+    res_.SetRes(CmdRes::kCacheMiss);
   } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
+  }
+}
+
+void HGetCmd::DoThroughDB() {
+  res_.clear();
+  Do();
+}
+
+void HGetCmd::DoUpdateCache() {
+  if (IsTooLargeKey(g_pika_conf->max_key_size_in_cache())) {
+    return;
+  }
+  if (s_.ok()) {
+    db_->cache()->PushKeyToAsyncLoadQueue(PIKA_KEY_TYPE_HASH, key_, db_);
   }
 }
 
@@ -86,47 +141,74 @@ void HGetallCmd::DoInitial() {
     return;
   }
   key_ = argv_[1];
-  return;
 }
 
-void HGetallCmd::Do(std::shared_ptr<Partition> partition) {
+void HGetallCmd::Do() {
   int64_t total_fv = 0;
-  int64_t cursor = 0, next_cursor = 0;
+  int64_t cursor = 0;
+  int64_t next_cursor = 0;
   size_t raw_limit = g_pika_conf->max_client_response_size();
   std::string raw;
-  rocksdb::Status s;
   std::vector<storage::FieldValue> fvs;
 
   do {
     fvs.clear();
-    s = partition->db()->HScan(key_, cursor, "*", PIKA_SCAN_STEP_LENGTH, &fvs, &next_cursor);
-    if (!s.ok()) {
+    s_ = db_->storage()->HScan(key_, cursor, "*", PIKA_SCAN_STEP_LENGTH, &fvs, &next_cursor);
+    if (!s_.ok()) {
       raw.clear();
       total_fv = 0;
       break;
     } else {
       for (const auto& fv : fvs) {
-        RedisAppendLen(raw, fv.field.size(), "$");
+        RedisAppendLenUint64(raw, fv.field.size(), "$");
         RedisAppendContent(raw, fv.field);
-        RedisAppendLen(raw, fv.value.size(), "$");
+        RedisAppendLenUint64(raw, fv.value.size(), "$");
         RedisAppendContent(raw, fv.value);
       }
       if (raw.size() >= raw_limit) {
         res_.SetRes(CmdRes::kErrOther, "Response exceeds the max-client-response-size limit");
         return;
       }
-      total_fv += fvs.size();
+      total_fv += static_cast<int64_t>(fvs.size());
       cursor = next_cursor;
     }
   } while (cursor != 0);
 
-  if (s.ok() || s.IsNotFound()) {
+  if (s_.ok() || s_.IsNotFound()) {
     res_.AppendArrayLen(total_fv * 2);
     res_.AppendStringRaw(raw);
   } else {
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
+  }
+}
+
+void HGetallCmd::ReadCache() {
+  std::vector<storage::FieldValue> fvs;
+  auto s = db_->cache()->HGetall(key_, &fvs);
+  if (s.ok()) {
+    res_.AppendArrayLen(fvs.size() * 2);
+    for (const auto& fv : fvs) {
+      res_.AppendStringLen(fv.field.size());
+      res_.AppendContent(fv.field);
+      res_.AppendStringLen(fv.value.size());
+      res_.AppendContent(fv.value);
+    }
+  } else if (s.IsNotFound()) {
+    res_.SetRes(CmdRes::kCacheMiss);
+  } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
   }
-  return;
+}
+
+void HGetallCmd::DoThroughDB() {
+  res_.clear();
+  Do();
+}
+
+void HGetallCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->PushKeyToAsyncLoadQueue(PIKA_KEY_TYPE_HASH, key_, db_);
+  }
 }
 
 void HExistsCmd::DoInitial() {
@@ -136,17 +218,40 @@ void HExistsCmd::DoInitial() {
   }
   key_ = argv_[1];
   field_ = argv_[2];
-  return;
 }
 
-void HExistsCmd::Do(std::shared_ptr<Partition> partition) {
-  rocksdb::Status s = partition->db()->HExists(key_, field_);
+void HExistsCmd::Do() {
+  s_ = db_->storage()->HExists(key_, field_);
+  if (s_.ok()) {
+    res_.AppendContent(":1");
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
+  } else if (s_.IsNotFound()) {
+    res_.AppendContent(":0");
+  } else {
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
+  }
+}
+
+void HExistsCmd::ReadCache() {
+  auto s = db_->cache()->HExists(key_, field_);
   if (s.ok()) {
     res_.AppendContent(":1");
   } else if (s.IsNotFound()) {
-    res_.AppendContent(":0");
+    res_.SetRes(CmdRes::kCacheMiss);
   } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
+  }
+}
+
+void HExistsCmd::DoThroughDB() {
+  res_.clear();
+  Do();
+}
+
+void HExistsCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->PushKeyToAsyncLoadQueue(PIKA_KEY_TYPE_HASH, key_, db_);
   }
 }
 
@@ -157,26 +262,37 @@ void HIncrbyCmd::DoInitial() {
   }
   key_ = argv_[1];
   field_ = argv_[2];
-  if (argv_[3].find(" ") != std::string::npos || !pstd::string2int(argv_[3].data(), argv_[3].size(), &by_)) {
+  if (argv_[3].find(' ') != std::string::npos || (pstd::string2int(argv_[3].data(), argv_[3].size(), &by_) == 0)) {
     res_.SetRes(CmdRes::kInvalidInt);
     return;
   }
-  return;
 }
 
-void HIncrbyCmd::Do(std::shared_ptr<Partition> partition) {
-  int64_t new_value;
-  rocksdb::Status s = partition->db()->HIncrby(key_, field_, by_, &new_value);
-  if (s.ok() || s.IsNotFound()) {
+void HIncrbyCmd::Do() {
+  int64_t new_value = 0;
+  s_ = db_->storage()->HIncrby(key_, field_, by_, &new_value);
+  if (s_.ok() || s_.IsNotFound()) {
     res_.AppendContent(":" + std::to_string(new_value));
-  } else if (s.IsCorruption() && s.ToString() == "Corruption: hash value is not an integer") {
+    AddSlotKey("h", key_, db_);
+  } else if (s_.IsInvalidArgument() && s_.ToString().substr(0, std::char_traits<char>::length(ErrTypeMessage)) == ErrTypeMessage) {
+    res_.SetRes(CmdRes::kMultiKey);
+  } else if (s_.IsCorruption() && s_.ToString() == "Corruption: hash value is not an integer") {
     res_.SetRes(CmdRes::kInvalidInt);
-  } else if (s.IsInvalidArgument()) {
+  } else if (s_.IsInvalidArgument()) {
     res_.SetRes(CmdRes::kOverFlow);
   } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
   }
-  return;
+}
+
+void HIncrbyCmd::DoThroughDB() {
+  Do();
+}
+
+void HIncrbyCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->HIncrbyxx(key_, field_, by_);
+  }
 }
 
 void HIncrbyfloatCmd::DoInitial() {
@@ -187,23 +303,37 @@ void HIncrbyfloatCmd::DoInitial() {
   key_ = argv_[1];
   field_ = argv_[2];
   by_ = argv_[3];
-  return;
 }
 
-void HIncrbyfloatCmd::Do(std::shared_ptr<Partition> partition) {
+void HIncrbyfloatCmd::Do() {
   std::string new_value;
-  rocksdb::Status s = partition->db()->HIncrbyfloat(key_, field_, by_, &new_value);
-  if (s.ok()) {
-    res_.AppendStringLen(new_value.size());
+  s_ = db_->storage()->HIncrbyfloat(key_, field_, by_, &new_value);
+  if (s_.ok()) {
+    res_.AppendStringLenUint64(new_value.size());
     res_.AppendContent(new_value);
-  } else if (s.IsCorruption() && s.ToString() == "Corruption: value is not a vaild float") {
+    AddSlotKey("h", key_, db_);
+  } else if (s_.IsInvalidArgument() && s_.ToString().substr(0, std::char_traits<char>::length(ErrTypeMessage)) == ErrTypeMessage) {
+    res_.SetRes(CmdRes::kMultiKey);
+  } else if (s_.IsCorruption() && s_.ToString() == "Corruption: value is not a vaild float") {
     res_.SetRes(CmdRes::kInvalidFloat);
-  } else if (s.IsInvalidArgument()) {
+  } else if (s_.IsInvalidArgument()) {
     res_.SetRes(CmdRes::kOverFlow);
   } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
   }
-  return;
+}
+
+void HIncrbyfloatCmd::DoThroughDB() {
+  Do();
+}
+
+void HIncrbyfloatCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    long double long_double_by;
+    if (storage::StrToLongDouble(by_.data(), by_.size(), &long_double_by) != -1) {
+      db_->cache()->HIncrbyfloatxx(key_, field_, long_double_by);
+    }
+  }
 }
 
 void HKeysCmd::DoInitial() {
@@ -212,21 +342,47 @@ void HKeysCmd::DoInitial() {
     return;
   }
   key_ = argv_[1];
-  return;
 }
 
-void HKeysCmd::Do(std::shared_ptr<Partition> partition) {
+void HKeysCmd::Do() {
   std::vector<std::string> fields;
-  rocksdb::Status s = partition->db()->HKeys(key_, &fields);
-  if (s.ok() || s.IsNotFound()) {
+  s_ = db_->storage()->HKeys(key_, &fields);
+  if (s_.ok() || s_.IsNotFound()) {
+    res_.AppendArrayLenUint64(fields.size());
+    for (const auto& field : fields) {
+      res_.AppendString(field);
+    }
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
+  } else {
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
+  }
+}
+
+void HKeysCmd::ReadCache() {
+  std::vector<std::string> fields;
+  auto s = db_->cache()->HKeys(key_, &fields);
+  if (s.ok()) {
     res_.AppendArrayLen(fields.size());
     for (const auto& field : fields) {
       res_.AppendString(field);
     }
+  } else if (s.IsNotFound()) {
+    res_.SetRes(CmdRes::kCacheMiss);
   } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
   }
-  return;
+}
+
+void HKeysCmd::DoThroughDB() {
+  res_.clear();
+  Do();
+}
+
+void HKeysCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->PushKeyToAsyncLoadQueue(PIKA_KEY_TYPE_HASH, key_, db_);
+  }
 }
 
 void HLenCmd::DoInitial() {
@@ -235,18 +391,41 @@ void HLenCmd::DoInitial() {
     return;
   }
   key_ = argv_[1];
-  return;
 }
 
-void HLenCmd::Do(std::shared_ptr<Partition> partition) {
+void HLenCmd::Do() {
   int32_t len = 0;
-  rocksdb::Status s = partition->db()->HLen(key_, &len);
-  if (s.ok() || s.IsNotFound()) {
+  s_ = db_->storage()->HLen(key_, &len);
+  if (s_.ok() || s_.IsNotFound()) {
     res_.AppendInteger(len);
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
   } else {
     res_.SetRes(CmdRes::kErrOther, "something wrong in hlen");
   }
-  return;
+}
+
+void HLenCmd::ReadCache() {
+  uint64_t len = 0;
+  auto s = db_->cache()->HLen(key_, &len);
+  if (s.ok()) {
+    res_.AppendInteger(len);
+  } else if (s.IsNotFound()) {
+    res_.SetRes(CmdRes::kCacheMiss);
+  } else {
+    res_.SetRes(CmdRes::kErrOther, "something wrong in hlen");
+  }
+}
+
+void HLenCmd::DoThroughDB() {
+  res_.clear();
+  Do();
+}
+
+void HLenCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->PushKeyToAsyncLoadQueue(PIKA_KEY_TYPE_HASH, key_, db_);
+  }
 }
 
 void HMgetCmd::DoInitial() {
@@ -255,17 +434,36 @@ void HMgetCmd::DoInitial() {
     return;
   }
   key_ = argv_[1];
-  PikaCmdArgsType::iterator iter = argv_.begin();
+  auto iter = argv_.begin();
   iter++;
   iter++;
   fields_.assign(iter, argv_.end());
-  return;
 }
 
-void HMgetCmd::Do(std::shared_ptr<Partition> partition) {
+void HMgetCmd::Do() {
   std::vector<storage::ValueStatus> vss;
-  rocksdb::Status s = partition->db()->HMGet(key_, fields_, &vss);
-  if (s.ok() || s.IsNotFound()) {
+  s_ = db_->storage()->HMGet(key_, fields_, &vss);
+  if (s_.ok() || s_.IsNotFound()) {
+    res_.AppendArrayLenUint64(vss.size());
+    for (const auto& vs : vss) {
+      if (vs.status.ok()) {
+        res_.AppendStringLenUint64(vs.value.size());
+        res_.AppendContent(vs.value);
+      } else {
+        res_.AppendContent("$-1");
+      }
+    }
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
+  } else {
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
+  }
+}
+
+void HMgetCmd::ReadCache() {
+  std::vector<storage::ValueStatus> vss;
+  auto s = db_->cache()->HMGet(key_, fields_, &vss);
+  if (s.ok()) {
     res_.AppendArrayLen(vss.size());
     for (const auto& vs : vss) {
       if (vs.status.ok()) {
@@ -275,10 +473,22 @@ void HMgetCmd::Do(std::shared_ptr<Partition> partition) {
         res_.AppendContent("$-1");
       }
     }
+  } else if (s.IsNotFound()) {
+    res_.SetRes(CmdRes::kCacheMiss);
   } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
   }
-  return;
+}
+
+void HMgetCmd::DoThroughDB() {
+  res_.clear();
+  Do();
+}
+
+void HMgetCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->PushKeyToAsyncLoadQueue(PIKA_KEY_TYPE_HASH, key_, db_);
+  }
 }
 
 void HMsetCmd::DoInitial() {
@@ -297,17 +507,28 @@ void HMsetCmd::DoInitial() {
   for (; index < argc; index += 2) {
     fvs_.push_back({argv_[index], argv_[index + 1]});
   }
-  return;
 }
 
-void HMsetCmd::Do(std::shared_ptr<Partition> partition) {
-  rocksdb::Status s = partition->db()->HMSet(key_, fvs_);
-  if (s.ok()) {
+void HMsetCmd::Do() {
+  s_ = db_->storage()->HMSet(key_, fvs_);
+  if (s_.ok()) {
     res_.SetRes(CmdRes::kOk);
+    AddSlotKey("h", key_, db_);
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
   } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
   }
-  return;
+}
+
+void HMsetCmd::DoThroughDB() {
+  Do();
+}
+
+void HMsetCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->HMSetxx(key_, fvs_);
+  }
 }
 
 void HSetnxCmd::DoInitial() {
@@ -318,16 +539,28 @@ void HSetnxCmd::DoInitial() {
   key_ = argv_[1];
   field_ = argv_[2];
   value_ = argv_[3];
-  return;
 }
 
-void HSetnxCmd::Do(std::shared_ptr<Partition> partition) {
+void HSetnxCmd::Do() {
   int32_t ret = 0;
-  rocksdb::Status s = partition->db()->HSetnx(key_, field_, value_, &ret);
-  if (s.ok()) {
+  s_ = db_->storage()->HSetnx(key_, field_, value_, &ret);
+  if (s_.ok()) {
     res_.AppendContent(":" + std::to_string(ret));
+    AddSlotKey("h", key_, db_);
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
   } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
+  }
+}
+
+void HSetnxCmd::DoThroughDB() {
+  Do();
+}
+
+void HSetnxCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->HSetIfKeyExistAndFieldNotExist(key_, field_, value_);
   }
 }
 
@@ -338,18 +571,42 @@ void HStrlenCmd::DoInitial() {
   }
   key_ = argv_[1];
   field_ = argv_[2];
-  return;
 }
 
-void HStrlenCmd::Do(std::shared_ptr<Partition> partition) {
+void HStrlenCmd::Do() {
   int32_t len = 0;
-  rocksdb::Status s = partition->db()->HStrlen(key_, field_, &len);
-  if (s.ok() || s.IsNotFound()) {
+  s_ = db_->storage()->HStrlen(key_, field_, &len);
+  if (s_.ok() || s_.IsNotFound()) {
     res_.AppendInteger(len);
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
+  } else {
+    res_.SetRes(CmdRes::kErrOther, "something wrong in hstrlen");
+  }
+}
+
+void HStrlenCmd::ReadCache() {
+  uint64_t len = 0;
+  auto s = db_->cache()->HStrlen(key_, field_, &len);
+  if (s.ok()) {
+    res_.AppendInteger(len);
+  } else if (s.IsNotFound()) {
+    res_.SetRes(CmdRes::kCacheMiss);
   } else {
     res_.SetRes(CmdRes::kErrOther, "something wrong in hstrlen");
   }
   return;
+}
+
+void HStrlenCmd::DoThroughDB() {
+  res_.clear();
+  Do();
+}
+
+void HStrlenCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->PushKeyToAsyncLoadQueue(PIKA_KEY_TYPE_HASH, key_, db_);
+  }
 }
 
 void HValsCmd::DoInitial() {
@@ -358,22 +615,49 @@ void HValsCmd::DoInitial() {
     return;
   }
   key_ = argv_[1];
-  return;
 }
 
-void HValsCmd::Do(std::shared_ptr<Partition> partition) {
+void HValsCmd::Do() {
   std::vector<std::string> values;
-  rocksdb::Status s = partition->db()->HVals(key_, &values);
-  if (s.ok() || s.IsNotFound()) {
+  s_ = db_->storage()->HVals(key_, &values);
+  if (s_.ok() || s_.IsNotFound()) {
+    res_.AppendArrayLenUint64(values.size());
+    for (const auto& value : values) {
+      res_.AppendStringLenUint64(value.size());
+      res_.AppendContent(value);
+    }
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
+  } else {
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
+  }
+}
+
+void HValsCmd::ReadCache() {
+  std::vector<std::string> values;
+  auto s = db_->cache()->HVals(key_, &values);
+  if (s.ok()) {
     res_.AppendArrayLen(values.size());
     for (const auto& value : values) {
       res_.AppendStringLen(value.size());
       res_.AppendContent(value);
     }
+  } else if (s.IsNotFound()) {
+    res_.SetRes(CmdRes::kCacheMiss);
   } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
   }
-  return;
+}
+
+void HValsCmd::DoThroughDB() {
+  res_.clear();
+  Do();
+}
+
+void HValsCmd::DoUpdateCache() {
+  if (s_.ok()) {
+    db_->cache()->PushKeyToAsyncLoadQueue(PIKA_KEY_TYPE_HASH, key_, db_);
+  }
 }
 
 void HScanCmd::DoInitial() {
@@ -382,23 +666,24 @@ void HScanCmd::DoInitial() {
     return;
   }
   key_ = argv_[1];
-  if (!pstd::string2int(argv_[2].data(), argv_[2].size(), &cursor_)) {
+  if (pstd::string2int(argv_[2].data(), argv_[2].size(), &cursor_) == 0) {
     res_.SetRes(CmdRes::kInvalidInt);
     return;
   }
-  size_t index = 3, argc = argv_.size();
+  size_t index = 3;
+  size_t argc = argv_.size();
 
   while (index < argc) {
     std::string opt = argv_[index];
-    if (!strcasecmp(opt.data(), "match") || !strcasecmp(opt.data(), "count")) {
+    if ((strcasecmp(opt.data(), "match") == 0) || (strcasecmp(opt.data(), "count") == 0)) {
       index++;
       if (index >= argc) {
         res_.SetRes(CmdRes::kSyntaxErr);
         return;
       }
-      if (!strcasecmp(opt.data(), "match")) {
+      if (strcasecmp(opt.data(), "match") == 0) {
         pattern_ = argv_[index];
-      } else if (!pstd::string2int(argv_[index].data(), argv_[index].size(), &count_)) {
+      } else if (pstd::string2int(argv_[index].data(), argv_[index].size(), &count_) == 0) {
         res_.SetRes(CmdRes::kInvalidInt);
         return;
       }
@@ -412,13 +697,12 @@ void HScanCmd::DoInitial() {
     res_.SetRes(CmdRes::kSyntaxErr);
     return;
   }
-  return;
 }
 
-void HScanCmd::Do(std::shared_ptr<Partition> partition) {
+void HScanCmd::Do() {
   int64_t next_cursor = 0;
   std::vector<storage::FieldValue> field_values;
-  rocksdb::Status s = partition->db()->HScan(key_, cursor_, pattern_, count_, &field_values, &next_cursor);
+  auto s = db_->storage()->HScan(key_, cursor_, pattern_, count_, &field_values, &next_cursor);
 
   if (s.ok() || s.IsNotFound()) {
     res_.AppendContent("*2");
@@ -427,15 +711,16 @@ void HScanCmd::Do(std::shared_ptr<Partition> partition) {
     res_.AppendStringLen(len);
     res_.AppendContent(buf);
 
-    res_.AppendArrayLen(field_values.size() * 2);
+    res_.AppendArrayLenUint64(field_values.size() * 2);
     for (const auto& field_value : field_values) {
       res_.AppendString(field_value.field);
       res_.AppendString(field_value.value);
     }
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
   } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
   }
-  return;
 }
 
 void HScanxCmd::DoInitial() {
@@ -446,18 +731,19 @@ void HScanxCmd::DoInitial() {
   key_ = argv_[1];
   start_field_ = argv_[2];
 
-  size_t index = 3, argc = argv_.size();
+  size_t index = 3;
+  size_t argc = argv_.size();
   while (index < argc) {
     std::string opt = argv_[index];
-    if (!strcasecmp(opt.data(), "match") || !strcasecmp(opt.data(), "count")) {
+    if ((strcasecmp(opt.data(), "match") == 0) || (strcasecmp(opt.data(), "count") == 0)) {
       index++;
       if (index >= argc) {
         res_.SetRes(CmdRes::kSyntaxErr);
         return;
       }
-      if (!strcasecmp(opt.data(), "match")) {
+      if (strcasecmp(opt.data(), "match") == 0) {
         pattern_ = argv_[index];
-      } else if (!pstd::string2int(argv_[index].data(), argv_[index].size(), &count_)) {
+      } else if (pstd::string2int(argv_[index].data(), argv_[index].size(), &count_) == 0) {
         res_.SetRes(CmdRes::kInvalidInt);
         return;
       }
@@ -471,28 +757,28 @@ void HScanxCmd::DoInitial() {
     res_.SetRes(CmdRes::kSyntaxErr);
     return;
   }
-  return;
 }
 
-void HScanxCmd::Do(std::shared_ptr<Partition> partition) {
+void HScanxCmd::Do() {
   std::string next_field;
   std::vector<storage::FieldValue> field_values;
-  rocksdb::Status s = partition->db()->HScanx(key_, start_field_, pattern_, count_, &field_values, &next_field);
+  rocksdb::Status s = db_->storage()->HScanx(key_, start_field_, pattern_, count_, &field_values, &next_field);
 
   if (s.ok() || s.IsNotFound()) {
     res_.AppendArrayLen(2);
-    res_.AppendStringLen(next_field.size());
+    res_.AppendStringLenUint64(next_field.size());
     res_.AppendContent(next_field);
 
-    res_.AppendArrayLen(2 * field_values.size());
+    res_.AppendArrayLenUint64(2 * field_values.size());
     for (const auto& field_value : field_values) {
       res_.AppendString(field_value.field);
       res_.AppendString(field_value.value);
     }
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
   } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
   }
-  return;
 }
 
 void PKHScanRangeCmd::DoInitial() {
@@ -504,18 +790,19 @@ void PKHScanRangeCmd::DoInitial() {
   field_start_ = argv_[2];
   field_end_ = argv_[3];
 
-  size_t index = 4, argc = argv_.size();
+  size_t index = 4;
+  size_t argc = argv_.size();
   while (index < argc) {
     std::string opt = argv_[index];
-    if (!strcasecmp(opt.data(), "match") || !strcasecmp(opt.data(), "limit")) {
+    if ((strcasecmp(opt.data(), "match") == 0) || (strcasecmp(opt.data(), "limit") == 0)) {
       index++;
       if (index >= argc) {
         res_.SetRes(CmdRes::kSyntaxErr);
         return;
       }
-      if (!strcasecmp(opt.data(), "match")) {
+      if (strcasecmp(opt.data(), "match") == 0) {
         pattern_ = argv_[index];
-      } else if (!pstd::string2int(argv_[index].data(), argv_[index].size(), &limit_) || limit_ <= 0) {
+      } else if ((pstd::string2int(argv_[index].data(), argv_[index].size(), &limit_) == 0) || limit_ <= 0) {
         res_.SetRes(CmdRes::kInvalidInt);
         return;
       }
@@ -525,28 +812,28 @@ void PKHScanRangeCmd::DoInitial() {
     }
     index++;
   }
-  return;
 }
 
-void PKHScanRangeCmd::Do(std::shared_ptr<Partition> partition) {
+void PKHScanRangeCmd::Do() {
   std::string next_field;
   std::vector<storage::FieldValue> field_values;
   rocksdb::Status s =
-      partition->db()->PKHScanRange(key_, field_start_, field_end_, pattern_, limit_, &field_values, &next_field);
+      db_->storage()->PKHScanRange(key_, field_start_, field_end_, pattern_, static_cast<int32_t>(limit_), &field_values, &next_field);
 
   if (s.ok() || s.IsNotFound()) {
     res_.AppendArrayLen(2);
     res_.AppendString(next_field);
 
-    res_.AppendArrayLen(2 * field_values.size());
+    res_.AppendArrayLenUint64(2 * field_values.size());
     for (const auto& field_value : field_values) {
       res_.AppendString(field_value.field);
       res_.AppendString(field_value.value);
     }
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
   } else {
     res_.SetRes(CmdRes::kErrOther, s.ToString());
   }
-  return;
 }
 
 void PKHRScanRangeCmd::DoInitial() {
@@ -558,18 +845,19 @@ void PKHRScanRangeCmd::DoInitial() {
   field_start_ = argv_[2];
   field_end_ = argv_[3];
 
-  size_t index = 4, argc = argv_.size();
+  size_t index = 4;
+  size_t argc = argv_.size();
   while (index < argc) {
     std::string opt = argv_[index];
-    if (!strcasecmp(opt.data(), "match") || !strcasecmp(opt.data(), "limit")) {
+    if ((strcasecmp(opt.data(), "match") == 0) || (strcasecmp(opt.data(), "limit") == 0)) {
       index++;
       if (index >= argc) {
         res_.SetRes(CmdRes::kSyntaxErr);
         return;
       }
-      if (!strcasecmp(opt.data(), "match")) {
+      if (strcasecmp(opt.data(), "match") == 0) {
         pattern_ = argv_[index];
-      } else if (!pstd::string2int(argv_[index].data(), argv_[index].size(), &limit_) || limit_ <= 0) {
+      } else if ((pstd::string2int(argv_[index].data(), argv_[index].size(), &limit_) == 0) || limit_ <= 0) {
         res_.SetRes(CmdRes::kInvalidInt);
         return;
       }
@@ -579,26 +867,26 @@ void PKHRScanRangeCmd::DoInitial() {
     }
     index++;
   }
-  return;
 }
 
-void PKHRScanRangeCmd::Do(std::shared_ptr<Partition> partition) {
+void PKHRScanRangeCmd::Do() {
   std::string next_field;
   std::vector<storage::FieldValue> field_values;
   rocksdb::Status s =
-      partition->db()->PKHRScanRange(key_, field_start_, field_end_, pattern_, limit_, &field_values, &next_field);
+      db_->storage()->PKHRScanRange(key_, field_start_, field_end_, pattern_, static_cast<int32_t>(limit_), &field_values, &next_field);
 
-  if (s.ok() || s.IsNotFound()) {
+  if (s_.ok() || s_.IsNotFound()) {
     res_.AppendArrayLen(2);
     res_.AppendString(next_field);
 
-    res_.AppendArrayLen(2 * field_values.size());
+    res_.AppendArrayLenUint64(2 * field_values.size());
     for (const auto& field_value : field_values) {
       res_.AppendString(field_value.field);
       res_.AppendString(field_value.value);
     }
-  } else {
-    res_.SetRes(CmdRes::kErrOther, s.ToString());
+  } else if (s_.IsInvalidArgument()) {
+    res_.SetRes(CmdRes::kMultiKey);
+  }  else {
+    res_.SetRes(CmdRes::kErrOther, s_.ToString());
   }
-  return;
 }

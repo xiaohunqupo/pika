@@ -11,23 +11,23 @@
 #include "include/pika_rm.h"
 #include "include/pika_server.h"
 
-extern PikaConf* g_pika_conf;
+using pstd::Status;
+
 extern PikaServer* g_pika_server;
-extern PikaReplicaManager* g_pika_rm;
+extern std::unique_ptr<PikaReplicaManager> g_pika_rm;
 
 PikaReplServer::PikaReplServer(const std::set<std::string>& ips, int port, int cron_interval) {
-  server_tp_ = new net::ThreadPool(PIKA_REPL_SERVER_TP_SIZE, 100000);
-  pika_repl_server_thread_ = new PikaReplServerThread(ips, port, cron_interval);
+  server_tp_ = std::make_unique<net::ThreadPool>(PIKA_REPL_SERVER_TP_SIZE, 100000, "PikaReplServer");
+  pika_repl_server_thread_ = std::make_unique<PikaReplServerThread>(ips, port, cron_interval);
   pika_repl_server_thread_->set_thread_name("PikaReplServer");
 }
 
 PikaReplServer::~PikaReplServer() {
-  delete pika_repl_server_thread_;
-  delete server_tp_;
   LOG(INFO) << "PikaReplServer exit!!!";
 }
 
 int PikaReplServer::Start() {
+  pika_repl_server_thread_->set_thread_name("PikaReplServer");
   int res = pika_repl_server_thread_->StartThread();
   if (res != net::kSuccess) {
     LOG(FATAL) << "Start Pika Repl Server Thread Error: " << res
@@ -47,6 +47,7 @@ int PikaReplServer::Start() {
 int PikaReplServer::Stop() {
   server_tp_->stop_thread_pool();
   pika_repl_server_thread_->StopThread();
+  pika_repl_server_thread_->Cleanup();
   return 0;
 }
 
@@ -89,47 +90,20 @@ void PikaReplServer::BuildBinlogOffset(const LogOffset& offset, InnerMessage::Bi
 void PikaReplServer::BuildBinlogSyncResp(const std::vector<WriteTask>& tasks, InnerMessage::InnerResponse* response) {
   response->set_code(InnerMessage::kOk);
   response->set_type(InnerMessage::Type::kBinlogSync);
-  LogOffset prev_offset;
-  bool founded = false;
   for (const auto& task : tasks) {
-    if (!task.binlog_chip_.binlog_.empty() && !founded) {
-      // find the first not keepalive prev_offset
-      prev_offset = task.prev_offset_;
-      founded = true;
-    }
     InnerMessage::InnerResponse::BinlogSync* binlog_sync = response->add_binlog_sync();
     binlog_sync->set_session_id(task.rm_node_.SessionId());
-    InnerMessage::Partition* partition = binlog_sync->mutable_partition();
-    partition->set_table_name(task.rm_node_.TableName());
-    partition->set_partition_id(task.rm_node_.PartitionId());
+    InnerMessage::Slot* db = binlog_sync->mutable_slot();
+    db->set_db_name(task.rm_node_.DBName());
+    /*
+     * Since the slot field is written in protobuffer,
+     * slot_id is set to the default value 0 for compatibility
+     * with older versions, but slot_id is not used
+     */
+    db->set_slot_id(0);
     InnerMessage::BinlogOffset* boffset = binlog_sync->mutable_binlog_offset();
     BuildBinlogOffset(task.binlog_chip_.offset_, boffset);
     binlog_sync->set_binlog(task.binlog_chip_.binlog_);
-  }
-  if (g_pika_conf->consensus_level() > 0) {
-    PartitionInfo p_info;
-    if (!tasks.empty()) {
-      p_info = tasks[0].rm_node_.NodePartitionInfo();
-    } else {
-      LOG(WARNING) << "Task size is zero";
-      return;
-    }
-
-    // write consensus_meta
-    InnerMessage::ConsensusMeta* consensus_meta = response->mutable_consensus_meta();
-    InnerMessage::BinlogOffset* last_log = consensus_meta->mutable_log_offset();
-    BuildBinlogOffset(prev_offset, last_log);
-    // commit
-    LogOffset committed_index;
-    std::shared_ptr<SyncMasterPartition> partition = g_pika_rm->GetSyncMasterPartitionByName(p_info);
-    if (!partition) {
-      LOG(WARNING) << "SyncPartition " << p_info.ToString() << " Not Found.";
-      return;
-    }
-    committed_index = partition->ConsensusCommittedIndex();
-    InnerMessage::BinlogOffset* committed = consensus_meta->mutable_commit();
-    BuildBinlogOffset(committed_index, committed);
-    consensus_meta->set_term(partition->ConsensusTerm());
   }
 }
 
@@ -141,7 +115,7 @@ pstd::Status PikaReplServer::Write(const std::string& ip, const int port, const 
   }
   int fd = client_conn_map_[ip_port];
   std::shared_ptr<net::PbConn> conn = std::dynamic_pointer_cast<net::PbConn>(pika_repl_server_thread_->get_conn(fd));
-  if (conn == nullptr) {
+  if (!conn) {
     return Status::NotFound("The" + ip_port + " conn cannot be found");
   }
 
@@ -162,7 +136,7 @@ void PikaReplServer::UpdateClientConnMap(const std::string& ip_port, int fd) {
 
 void PikaReplServer::RemoveClientConn(int fd) {
   std::lock_guard l(client_conn_rwlock_);
-  std::map<std::string, int>::const_iterator iter = client_conn_map_.begin();
+  auto iter = client_conn_map_.begin();
   while (iter != client_conn_map_.end()) {
     if (iter->second == fd) {
       iter = client_conn_map_.erase(iter);

@@ -1,12 +1,17 @@
 #include <fstream>
 #include <sstream>
 #include <string>
-
+#include <memory>
 #include <glog/logging.h>
 
 #include "pstd/include/env.h"
 #include "pstd/include/rsync.h"
 #include "pstd/include/xdebug.h"
+
+#ifdef __FreeBSD__
+#  include <sys/types.h>
+#  include <sys/wait.h>
+#endif
 
 namespace pstd {
 // Clean files for rsync info, such as the lock, log, pid, conf file
@@ -95,20 +100,17 @@ int StopRsync(const std::string& raw_path) {
   }
 
   // Kill Rsync
-  SequentialFile* sequential_file;
-  if (!NewSequentialFile(pid_file, &sequential_file).ok()) {
+  std::unique_ptr<SequentialFile> sequential_file;
+  if (!NewSequentialFile(pid_file, sequential_file).ok()) {
     LOG(WARNING) << "no rsync pid file found";
     return 0;
   };
 
   char line[32];
-  if (sequential_file->ReadLine(line, 32) == nullptr) {
+  if (!(sequential_file->ReadLine(line, 32))) {
     LOG(WARNING) << "read rsync pid file err";
-    delete sequential_file;
     return 0;
   };
-
-  delete sequential_file;
 
   pid_t pid = atoi(line);
 
@@ -117,7 +119,7 @@ int StopRsync(const std::string& raw_path) {
     return 0;
   }
 
-  std::string rsync_stop_cmd = "kill -- -$(ps -o pgid= " + std::to_string(pid) + ")";
+  std::string rsync_stop_cmd = "kill -- -$(ps -o pgid -p" + std::to_string(pid) + " | grep -o '[0-9]*')";
   int ret = system(rsync_stop_cmd.c_str());
   if (ret == 0 || (WIFEXITED(ret) && !WEXITSTATUS(ret))) {
     LOG(INFO) << "Stop rsync success!";
@@ -149,7 +151,8 @@ int RsyncSendClearTarget(const std::string& local_dir_path, const std::string& r
   if (local_dir_path.empty() || remote_dir_path.empty()) {
     return -2;
   }
-  std::string local_dir(local_dir_path), remote_dir(remote_dir_path);
+  std::string local_dir(local_dir_path);
+  std::string remote_dir(remote_dir_path);
   if (local_dir_path.back() != '/') {
     local_dir.append("/");
   }

@@ -17,13 +17,12 @@
 class PikaReplClientThread : public net::ClientThread {
  public:
   PikaReplClientThread(int cron_interval, int keepalive_timeout);
-  virtual ~PikaReplClientThread() = default;
-  int Start();
+  ~PikaReplClientThread() override = default;
 
  private:
   class ReplClientConnFactory : public net::ConnFactory {
    public:
-    virtual std::shared_ptr<net::NetConn> NewNetConn(int connfd, const std::string& ip_port, net::Thread* thread,
+    std::shared_ptr<net::NetConn> NewNetConn(int connfd, const std::string& ip_port, net::Thread* thread,
                                                      void* worker_specific_data,
                                                      net::NetMultiplexer* net) const override {
       return std::static_pointer_cast<net::NetConn>(
@@ -36,16 +35,11 @@ class PikaReplClientThread : public net::ClientThread {
     void FdTimeoutHandle(int fd, const std::string& ip_port) const override;
     void FdClosedHandle(int fd, const std::string& ip_port) const override;
     bool AccessHandle(std::string& ip) const override {
-      // ban 127.0.0.1 if you want to test this routine
-      // if (ip.find("127.0.0.2") != std::string::npos) {
-      //   std::cout << "AccessHandle " << ip << std::endl;
-      //   return false;
-      // }
       return true;
     }
     int CreateWorkerSpecificData(void** data) const override { return 0; }
     int DeleteWorkerSpecificData(void* data) const override { return 0; }
-    void DestConnectFailedHandle(std::string ip_port, std::string reason) const override {}
+    void DestConnectFailedHandle(const std::string& ip_port, const std::string& reason) const override {}
   };
 
   ReplClientConnFactory conn_factory_;

@@ -4,7 +4,7 @@
 
 # export PATH := $(PATH):$(GOPATH)/bin
 
-# for mac 
+# for mac
 BRANCH			:= $(shell git branch | sed  's/* \(.*\)/\1/p')
 # for Linux
 # BRANCH			:= $(shell git branch | sed --quiet 's/* \(.*\)/\1/p')
@@ -62,7 +62,7 @@ export TEST_COVER
 all: build 
 
 build: deps
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o bin/$(PROJNAME)
+	CGO_ENABLED=0 go build -o bin/$(PROJNAME)
 
 deps: generateVer
 	@mkdir -p bin

@@ -1,12 +1,17 @@
 package exporter
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
+	"testing"
+
 	"github.com/Masterminds/semver"
+	"github.com/stretchr/testify/assert"
+
+	"github.com/OpenAtomFoundation/pika/tools/pika_exporter/discovery"
 	"github.com/OpenAtomFoundation/pika/tools/pika_exporter/exporter/metrics"
 	"github.com/OpenAtomFoundation/pika/tools/pika_exporter/exporter/test"
-	"github.com/stretchr/testify/assert"
-	"testing"
 )
 
 func mustNewVersionConstraint(version string) *semver.Constraints {
@@ -66,7 +71,7 @@ os:Linux 3.10.0-1062.9.1.el7.x86_64 x86_64`
 func Benchmark_Parse(b *testing.B) {
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			info := test.V320MasterInfo
+			info := test.V342PikaInfo
 
 			version, extracts, err := parseInfo(info)
 			if err != nil {
@@ -89,4 +94,38 @@ func Benchmark_Parse(b *testing.B) {
 			}
 		}
 	})
+}
+
+func Test_Parse_Proxy_Stats(t *testing.T) {
+	jsonFile := "mockProxyStats.json"
+	jsonData, err := ioutil.ReadFile(jsonFile)
+	if err != nil {
+		t.Fatalf("failed to read test data: %v", err)
+	}
+	var resultProxy discovery.ProxyStats
+	err = json.Unmarshal(jsonData, &resultProxy)
+
+	result, resultCmd, err := metrics.StructToMap(resultProxy)
+
+	result[metrics.LabelNameAddr] = "addr"
+	result[metrics.LabelID] = "id"
+	result[metrics.LabelProductName] = "productName"
+
+	collector := metrics.CollectFunc(func(m metrics.Metric) error {
+		t.Logf("metric:%#v", m)
+		return nil
+	})
+
+	parseOpt := metrics.ParseOption{
+		Version:       nil,
+		Extracts:      result,
+		ExtractsProxy: resultCmd,
+		Info:          "",
+	}
+
+	t.Logf("########## begin parse###########")
+	for _, m := range metrics.MetricConfigsProxy {
+		m.Parse(m, collector, parseOpt)
+		fmt.Println(m)
+	}
 }

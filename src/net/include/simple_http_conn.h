@@ -38,20 +38,20 @@ class Request {
 
   Request();
   void Clear();
-  bool ParseHeadFromArray(const char* data, const int size);
-  bool ParseBodyFromArray(const char* data, const int size);
+  bool ParseHeadFromArray(const char* data, int size);
+  bool ParseBodyFromArray(const char* data, int size);
 
  private:
   enum ParseStatus { kHeaderMethod, kHeaderPath, kHeaderVersion, kHeaderParamKey, kHeaderParamValue, kBody };
 
   bool ParseGetUrl();
   bool ParseHeadLine(const char* data, int line_start, int line_end, ParseStatus* parseStatus);
-  bool ParseParameters(const std::string data, size_t line_start = 0, bool from_url = true);
+  bool ParseParameters(const std::string& data, size_t line_start = 0, bool from_url = true);
 };
 
 class Response {
  public:
-  Response() : status_code_(0) {}
+  Response() = default;
   void Clear();
   int SerializeHeaderToArray(char* data, size_t size);
   int SerializeBodyToArray(char* data, size_t size, int* pos);
@@ -66,7 +66,7 @@ class Response {
   void SetBody(const std::string& body) { body_.assign(body); }
 
  private:
-  int status_code_;
+  int status_code_{0};
   std::string reason_phrase_;
   std::map<std::string, std::string> headers_;
   std::string body_;
@@ -74,11 +74,11 @@ class Response {
 
 class SimpleHTTPConn : public NetConn {
  public:
-  SimpleHTTPConn(const int fd, const std::string& ip_port, Thread* thread);
-  virtual ~SimpleHTTPConn();
+  SimpleHTTPConn(int fd, const std::string& ip_port, Thread* thread);
+  ~SimpleHTTPConn() override;
 
-  virtual ReadStatus GetRequest() override;
-  virtual WriteStatus SendReply() override;
+  ReadStatus GetRequest() override;
+  WriteStatus SendReply() override;
 
  private:
   virtual void DealMessage(const Request* req, Response* res) = 0;
@@ -88,17 +88,17 @@ class SimpleHTTPConn : public NetConn {
   bool FillResponseBuf();
   void HandleMessage();
 
-  ConnStatus conn_status_;
+  ConnStatus conn_status_{kHeader};
   char* rbuf_;
-  uint32_t rbuf_pos_;
+  uint32_t rbuf_pos_{0};
   char* wbuf_;
-  uint32_t wbuf_len_;  // length we wanna write out
-  uint32_t wbuf_pos_;
-  uint32_t header_len_;
-  uint64_t remain_packet_len_;
+  uint32_t wbuf_len_{0};  // length we wanna write out
+  uint32_t wbuf_pos_{0};
+  uint32_t header_len_{0};
+  uint64_t remain_packet_len_{0};
 
   Request* request_;
-  int response_pos_;
+  int response_pos_{-1};
   Response* response_;
 };
 

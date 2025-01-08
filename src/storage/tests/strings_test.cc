@@ -7,6 +7,10 @@
 #include <iostream>
 #include <thread>
 
+#include "glog/logging.h"
+
+#include "pstd/include/pika_codis_slot.h"
+#include "pstd/include/env.h"
 #include "storage/storage.h"
 #include "storage/util.h"
 
@@ -14,14 +18,13 @@ using namespace storage;
 
 class StringsTest : public ::testing::Test {
  public:
-  StringsTest() {}
-  virtual ~StringsTest() {}
+  StringsTest() = default;
+  ~StringsTest() override = default;
 
   void SetUp() override {
     std::string path = "./db/strings";
-    if (access(path.c_str(), F_OK)) {
-      mkdir(path.c_str(), 0755);
-    }
+    pstd::DeleteDirIfExist(path);
+    mkdir(path.c_str(), 0755);
     storage_options.options.create_if_missing = true;
     s = db.Open(storage_options, path);
   }
@@ -31,8 +34,8 @@ class StringsTest : public ::testing::Test {
     DeleteFiles(path.c_str());
   }
 
-  static void SetUpTestCase() {}
-  static void TearDownTestCase() {}
+  static void SetUpTestSuite() {}
+  static void TearDownTestSuite() {}
 
   StorageOptions storage_options;
   storage::Storage db;
@@ -41,8 +44,8 @@ class StringsTest : public ::testing::Test {
 
 static bool make_expired(storage::Storage* const db, const Slice& key) {
   std::map<storage::DataType, rocksdb::Status> type_status;
-  int ret = db->Expire(key, 1, &type_status);
-  if (!ret || !type_status[storage::DataType::kStrings].ok()) {
+  int ret = db->Expire(key, 1 * 100);
+  if ((ret == 0) || !type_status[storage::DataType::kStrings].ok()) {
     return false;
   }
   std::this_thread::sleep_for(std::chrono::milliseconds(2000));
@@ -50,37 +53,37 @@ static bool make_expired(storage::Storage* const db, const Slice& key) {
 }
 
 static bool string_ttl(storage::Storage* const db, const Slice& key, int32_t* ttl) {
-  std::map<storage::DataType, int64_t> type_ttl;
+  int64_t type_ttl;
   std::map<storage::DataType, Status> type_status;
-  type_ttl = db->TTL(key, &type_status);
+  type_ttl = db->TTL(key);
   for (const auto& item : type_status) {
     if (item.second != Status::OK() && item.second != Status::NotFound()) {
       return false;
     }
   }
-  if (type_ttl.find(storage::DataType::kStrings) == type_ttl.end()) {
-    *ttl = -1;
-    return false;
-  } else {
-    *ttl = type_ttl[storage::DataType::kStrings];
+    *ttl = type_ttl;
     return true;
-  }
 }
 
 // Append
 TEST_F(StringsTest, AppendTest) {
   int32_t ret;
   std::string value;
+  std::string new_value;
   std::map<DataType, Status> type_status;
-  std::map<DataType, int64_t> type_ttl;
+  int64_t expired_timestamp_millsec = 0;
+  int64_t expired_ttl_sec = 0;
+
   // ***************** Group 1 Test *****************
-  s = db.Append("GP1_APPEND_KEY", "HELLO", &ret);
+  s = db.Append("GP1_APPEND_KEY", "HELLO", &ret, &expired_timestamp_millsec, new_value);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 5);
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
-  s = db.Append("GP1_APPEND_KEY", " WORLD", &ret);
+  s = db.Append("GP1_APPEND_KEY", " WORLD", &ret, &expired_timestamp_millsec, new_value);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 11);
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
   s = db.Get("GP1_APPEND_KEY", &value);
   ASSERT_STREQ(value.c_str(), "HELLO WORLD");
@@ -88,38 +91,44 @@ TEST_F(StringsTest, AppendTest) {
   // ***************** Group 2 Test *****************
   s = db.Set("GP2_APPEND_KEY", "VALUE");
   ASSERT_TRUE(s.ok());
-  ret = db.Expire("GP2_APPEND_KEY", 100, &type_status);
+
+  int64_t expect_expired_timestamp_millsec = pstd::NowMillis() + 1000 * 100;
+  ret = db.Expire("GP2_APPEND_KEY", 100 * 1000);
   ASSERT_EQ(ret, 1);
   type_status.clear();
-  type_ttl = db.TTL("GP2_APPEND_KEY", &type_status);
-  ASSERT_LE(type_ttl[kStrings], 100);
-  ASSERT_GE(type_ttl[kStrings], 0);
+  expired_ttl_sec = db.TTL("GP2_APPEND_KEY");
+  ASSERT_LE(expired_ttl_sec, 100);
+  ASSERT_GE(expired_ttl_sec, 0);
 
-  s = db.Append("GP2_APPEND_KEY", "VALUE", &ret);
+  std::this_thread::sleep_for(std::chrono::milliseconds(5 * 1000));
+  s = db.Append("GP2_APPEND_KEY", "VALUE", &ret, &expired_timestamp_millsec, new_value);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 10);
   s = db.Get("GP2_APPEND_KEY", &value);
   ASSERT_STREQ(value.c_str(), "VALUEVALUE");
+  ASSERT_GE(expired_timestamp_millsec, expect_expired_timestamp_millsec);
+  ASSERT_LT(expired_timestamp_millsec, expect_expired_timestamp_millsec + 1000);
 
   type_status.clear();
-  type_ttl = db.TTL("GP2_APPEND_KEY", &type_status);
-  ASSERT_LE(type_ttl[kStrings], 100);
-  ASSERT_GE(type_ttl[kStrings], 0);
+  expired_ttl_sec = db.TTL("GP2_APPEND_KEY");
+  ASSERT_LE(expired_ttl_sec, 95);
+  ASSERT_GT(expired_ttl_sec, 85);
 
   // ***************** Group 3 Test *****************
   s = db.Set("GP3_APPEND_KEY", "VALUE");
   ASSERT_TRUE(s.ok());
   make_expired(&db, "GP3_APPEND_KEY");
 
-  s = db.Append("GP3_APPEND_KEY", "VALUE", &ret);
+  s = db.Append("GP3_APPEND_KEY", "VALUE", &ret, &expired_timestamp_millsec, new_value);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 5);
+  ASSERT_EQ(expired_timestamp_millsec, 0);
   s = db.Get("GP3_APPEND_KEY", &value);
   ASSERT_STREQ(value.c_str(), "VALUE");
 
   type_status.clear();
-  type_ttl = db.TTL("GP3_APPEND_KEY", &type_status);
-  ASSERT_EQ(type_ttl[kStrings], -1);
+  expired_ttl_sec = db.TTL("GP3_APPEND_KEY");
+  ASSERT_EQ(expired_ttl_sec, -1);
 }
 
 // BitCount
@@ -144,63 +153,64 @@ TEST_F(StringsTest, BitCountTest) {
   ASSERT_EQ(ret, 6);
 }
 
-// TODO(@tangruilin): 修复测试代码
 // BitOp
-// TEST_F(StringsTest, BitOpTest) {
-//   int64_t ret;
-//   std::string value;
-//   s = db.Set("BITOP_KEY1", "FOOBAR");
-//   ASSERT_TRUE(s.ok());
-//   s = db.Set("BITOP_KEY2", "ABCDEF");
-//   ASSERT_TRUE(s.ok());
-//   s = db.Set("BITOP_KEY3", "STORAGE");
-//   ASSERT_TRUE(s.ok());
-//   std::vector<std::string> src_keys {"BITOP_KEY1", "BITOP_KEY2", "BITOP_KEY3"};
+TEST_F(StringsTest, BitOpTest) {
+  int64_t ret;
+  std::string value;
+  s = db.Set("BITOP_KEY1", "FOOBAR");
+  ASSERT_TRUE(s.ok());
+  s = db.Set("BITOP_KEY2", "ABCDEF");
+  ASSERT_TRUE(s.ok());
+  s = db.Set("BITOP_KEY3", "STORAGE");
+  ASSERT_TRUE(s.ok());
+  std::vector<std::string> src_keys {"BITOP_KEY1", "BITOP_KEY2", "BITOP_KEY3"};
 
-//   // AND
-//   s = db.BitOp(storage::BitOpType::kBitOpAnd,
-//                "BITOP_DESTKEY", src_keys, &ret);
-//   ASSERT_TRUE(s.ok());
-//   ASSERT_EQ(ret, 10);
-//   s = db.Get("BITOP_DESTKEY", &value);
-//   ASSERT_STREQ(value.c_str(), "@@A@AB\x00\x00\x00\x00");
+  std::string value_to_dest{};
 
-//   // OR
-//   s = db.BitOp(storage::BitOpType::kBitOpOr,
-//                "BITOP_DESTKEY", src_keys, &ret);
-//   ASSERT_TRUE(s.ok());
-//   ASSERT_EQ(ret, 10);
-//   s = db.Get("BITOP_DESTKEY", &value);
-//   ASSERT_STREQ(value.c_str(), "GOOGOWIDOW");
+  // AND
+  s = db.BitOp(storage::BitOpType::kBitOpAnd,
+               "BITOP_DESTKEY", src_keys, std::ref(value_to_dest), &ret);
+  ASSERT_TRUE(s.ok());
+  ASSERT_EQ(ret, 7);
+  s = db.Get("BITOP_DESTKEY", &value);
+  ASSERT_STREQ(value.c_str(), "@@C@AB\x00");
 
-//   // XOR
-//   s = db.BitOp(storage::BitOpType::kBitOpXor,
-//                "BITOP_DESTKEY", src_keys, &ret);
-//   ASSERT_TRUE(s.ok());
-//   ASSERT_EQ(ret, 10);
-//   s = db.Get("BITOP_DESTKEY", &value);
-//   ASSERT_STREQ(value.c_str(), "EAMEOCIDOW");
+  // OR
+  s = db.BitOp(storage::BitOpType::kBitOpOr,
+               "BITOP_DESTKEY", src_keys, std::ref(value_to_dest), &ret);
+  ASSERT_TRUE(s.ok());
+  ASSERT_EQ(ret, 7);
+  s = db.Get("BITOP_DESTKEY", &value);
+  ASSERT_STREQ(value.c_str(), "W_OVEWE");
 
-//   // NOT
-//   std::vector<std::string> not_keys {"BITOP_KEY1"};
-//   s = db.BitOp(storage::BitOpType::kBitOpNot,
-//                "BITOP_DESTKEY", not_keys, &ret);
-//   ASSERT_TRUE(s.ok());
-//   ASSERT_EQ(ret, 6);
-//   s = db.Get("BITOP_DESTKEY", &value);
-//   ASSERT_STREQ(value.c_str(), "\xb9\xb0\xb0\xbd\xbe\xad");
-//   // NOT operation more than two parameters
-//   s = db.BitOp(storage::BitOpType::kBitOpNot,
-//                "BITOP_DESTKEY", src_keys, &ret);
-//   ASSERT_TRUE(s.IsInvalidArgument());
-// }
+  // XOR
+  s = db.BitOp(storage::BitOpType::kBitOpXor,
+               "BITOP_DESTKEY", src_keys, std::ref(value_to_dest), &ret);
+  ASSERT_TRUE(s.ok());
+  ASSERT_EQ(ret, 7);
+  s = db.Get("BITOP_DESTKEY", &value);
+  ASSERT_STREQ(value.c_str(), "TYCTESE");
+
+  // NOT
+  std::vector<std::string> not_keys {"BITOP_KEY1"};
+  s = db.BitOp(storage::BitOpType::kBitOpNot,
+               "BITOP_DESTKEY", not_keys, std::ref(value_to_dest), &ret);
+  ASSERT_TRUE(s.ok());
+  ASSERT_EQ(ret, 6);
+  s = db.Get("BITOP_DESTKEY", &value);
+  ASSERT_STREQ(value.c_str(), "\xb9\xb0\xb0\xbd\xbe\xad");
+  // NOT operation more than two parameters
+  s = db.BitOp(storage::BitOpType::kBitOpNot,
+               "BITOP_DESTKEY", src_keys, std::ref(value_to_dest), &ret);
+  ASSERT_TRUE(s.IsInvalidArgument());
+}
 
 // Decrby
 TEST_F(StringsTest, DecrbyTest) {
   int64_t ret;
   std::string value;
   std::map<DataType, Status> type_status;
-  std::map<DataType, int64_t> type_ttl;
+  int64_t type_ttl;
 
   // ***************** Group 1 Test *****************
   // If the key is not exist
@@ -223,12 +233,12 @@ TEST_F(StringsTest, DecrbyTest) {
   // ***************** Group 2 Test *****************
   s = db.Set("GP2_DECRBY_KEY", "10");
   ASSERT_TRUE(s.ok());
-  ret = db.Expire("GP2_DECRBY_KEY", 100, &type_status);
+  ret = db.Expire("GP2_DECRBY_KEY", 100);
   ASSERT_EQ(ret, 1);
   type_status.clear();
-  type_ttl = db.TTL("GP2_DECRBY_KEY", &type_status);
-  ASSERT_LE(type_ttl[kStrings], 100);
-  ASSERT_GE(type_ttl[kStrings], 0);
+  type_ttl = db.TTL("GP2_DECRBY_KEY");
+  ASSERT_LE(type_ttl, 100);
+  ASSERT_GE(type_ttl, 0);
 
   s = db.Decrby("GP2_DECRBY_KEY", 5, &ret);
   ASSERT_TRUE(s.ok());
@@ -236,9 +246,9 @@ TEST_F(StringsTest, DecrbyTest) {
   s = db.Get("GP2_DECRBY_KEY", &value);
   ASSERT_EQ(value, "5");
 
-  type_ttl = db.TTL("GP2_DECRBY_KEY", &type_status);
-  ASSERT_LE(type_ttl[kStrings], 100);
-  ASSERT_GE(type_ttl[kStrings], 0);
+  type_ttl = db.TTL("GP2_DECRBY_KEY");
+  ASSERT_LE(type_ttl, 100);
+  ASSERT_GE(type_ttl, 0);
 
   // ***************** Group 3 Test *****************
   s = db.Set("GP3_DECRBY_KEY", "10");
@@ -252,8 +262,8 @@ TEST_F(StringsTest, DecrbyTest) {
   ASSERT_EQ(value, "-5");
 
   type_status.clear();
-  type_ttl = db.TTL("GP3_DECRBY_KEY", &type_status);
-  ASSERT_EQ(type_ttl[kStrings], -1);
+  type_ttl = db.TTL("GP3_DECRBY_KEY");
+  ASSERT_EQ(type_ttl, -1);
 
   // ***************** Group 4 Test *****************
   s = db.Set("GP4_DECRBY_KEY", "100000");
@@ -350,70 +360,86 @@ TEST_F(StringsTest, IncrbyTest) {
   int64_t ret;
   std::string value;
   std::map<DataType, Status> type_status;
-  std::map<DataType, int64_t> type_ttl;
+  int64_t expired_timestamp_millsec = 0;
+  int64_t expired_ttl_sec = 0;
 
   // ***************** Group 1 Test *****************
   // If the key is not exist
-  s = db.Incrby("GP1_INCRBY_KEY", 5, &ret);
+  s = db.Incrby("GP1_INCRBY_KEY", 5, &ret, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 5);
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
   // If the key contains a string that can not be represented as integer
   s = db.Set("GP1_INCRBY_KEY", "INCRBY_VALUE");
   ASSERT_TRUE(s.ok());
-  s = db.Incrby("GP1_INCRBY_KEY", 5, &ret);
+  s = db.Incrby("GP1_INCRBY_KEY", 5, &ret, &expired_timestamp_millsec);
   ASSERT_TRUE(s.IsCorruption());
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
   s = db.Set("GP1_INCRBY_KEY", "1");
   ASSERT_TRUE(s.ok());
   // Less than the maximum number 9223372036854775807
-  s = db.Incrby("GP1_INCRBY_KEY", 9223372036854775807, &ret);
+  s = db.Incrby("GP1_INCRBY_KEY", 9223372036854775807, &ret, &expired_timestamp_millsec);
   ASSERT_TRUE(s.IsInvalidArgument());
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
   // ***************** Group 2 Test *****************
   s = db.Set("GP2_INCRBY_KEY", "10");
   ASSERT_TRUE(s.ok());
-  ret = db.Expire("GP2_INCRBY_KEY", 100, &type_status);
+  int64_t expect_expired_timestamp_millsec = pstd::NowMillis() + 1000 * 100;
+  ret = db.Expire("GP2_INCRBY_KEY", 1000 * 100);
   ASSERT_EQ(ret, 1);
   type_status.clear();
-  type_ttl = db.TTL("GP2_INCRBY_KEY", &type_status);
-  ASSERT_LE(type_ttl[kStrings], 100);
-  ASSERT_GE(type_ttl[kStrings], 0);
 
-  s = db.Incrby("GP2_INCRBY_KEY", 5, &ret);
+  std::this_thread::sleep_for(std::chrono::seconds (5));
+  expired_ttl_sec = db.TTL("GP2_INCRBY_KEY");
+  ASSERT_LE(expired_ttl_sec, 95);
+  ASSERT_GT(expired_ttl_sec, 0);
+
+  s = db.Incrby("GP2_INCRBY_KEY", 5, &ret, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 15);
   s = db.Get("GP2_INCRBY_KEY", &value);
   ASSERT_EQ(value, "15");
+  ASSERT_GE(expired_timestamp_millsec, expect_expired_timestamp_millsec);
+  ASSERT_LT(expired_timestamp_millsec, expect_expired_timestamp_millsec + 1000);
 
-  type_ttl = db.TTL("GP2_INCRBY_KEY", &type_status);
-  ASSERT_LE(type_ttl[kStrings], 100);
-  ASSERT_GE(type_ttl[kStrings], 0);
+  std::this_thread::sleep_for(std::chrono::seconds (1));
+  expired_ttl_sec = db.TTL("GP2_INCRBY_KEY");
+  ASSERT_LE(expired_ttl_sec, 94);
+  ASSERT_GT(expired_ttl_sec, 0);
 
   // ***************** Group 3 Test *****************
   s = db.Set("GP3_INCRBY_KEY", "10");
   ASSERT_TRUE(s.ok());
   make_expired(&db, "GP3_INCRBY_KEY");
 
-  s = db.Incrby("GP3_INCRBY_KEY", 5, &ret);
+  s = db.Get("GP3_INCRBY_KEY", &value);
+  ASSERT_EQ(value, "");
+
+  expired_timestamp_millsec = 0;
+  s = db.Incrby("GP3_INCRBY_KEY", 5, &ret, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 5);
   s = db.Get("GP3_INCRBY_KEY", &value);
   ASSERT_EQ(value, "5");
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
   type_status.clear();
-  type_ttl = db.TTL("GP3_INCRBY_KEY", &type_status);
-  ASSERT_EQ(type_ttl[kStrings], -1);
+  expired_ttl_sec = db.TTL("GP3_INCRBY_KEY");
+  ASSERT_EQ(expired_ttl_sec, -1);
 
   // ***************** Group 4 Test *****************
   s = db.Set("GP4_INCRBY_KEY", "50000");
   ASSERT_TRUE(s.ok());
 
-  s = db.Incrby("GP4_INCRBY_KEY", 50000, &ret);
+  s = db.Incrby("GP4_INCRBY_KEY", 50000, &ret, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 100000);
   s = db.Get("GP4_INCRBY_KEY", &value);
   ASSERT_EQ(value, "100000");
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 }
 
 // Incrbyfloat
@@ -421,68 +447,82 @@ TEST_F(StringsTest, IncrbyfloatTest) {
   int32_t ret;
   std::string value;
   std::map<DataType, Status> type_status;
-  std::map<DataType, int64_t> type_ttl;
+
+  double eps = 0.1;
+
+  int64_t expired_timestamp_millsec = 0;
+  int64_t expired_ttl_sec = 0;
 
   // ***************** Group 1 Test *****************
   s = db.Set("GP1_INCRBYFLOAT_KEY", "10.50");
   ASSERT_TRUE(s.ok());
-  s = db.Incrbyfloat("GP1_INCRBYFLOAT_KEY", "0.1", &value);
+  s = db.Incrbyfloat("GP1_INCRBYFLOAT_KEY", "0.1", &value, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
-  ASSERT_STREQ(value.c_str(), "10.6");
-  s = db.Incrbyfloat("GP1_INCRBYFLOAT_KEY", "-5", &value);
+  ASSERT_NEAR(std::stod(value), 10.6, eps);
+  ASSERT_EQ(expired_timestamp_millsec, 0);
+  s = db.Incrbyfloat("GP1_INCRBYFLOAT_KEY", "-5", &value, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
-  ASSERT_STREQ(value.c_str(), "5.6");
+  ASSERT_NEAR(std::stod(value), 5.6, eps);
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
   // If the key contains a string that can not be represented as integer
   s = db.Set("GP1_INCRBYFLOAT_KEY", "INCRBY_VALUE");
   ASSERT_TRUE(s.ok());
-  s = db.Incrbyfloat("GP1_INCRBYFLOAT_KEY", "5", &value);
+  s = db.Incrbyfloat("GP1_INCRBYFLOAT_KEY", "5", &value, &expired_timestamp_millsec);
   ASSERT_TRUE(s.IsCorruption());
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
   // ***************** Group 2 Test *****************
   s = db.Set("GP2_INCRBYFLOAT_KEY", "10.11111");
   ASSERT_TRUE(s.ok());
-  ret = db.Expire("GP2_INCRBYFLOAT_KEY", 100, &type_status);
+  int64_t expect_expired_timestamp_millsec = pstd::NowMillis() + 1000 * 100;
+  ret = db.Expire("GP2_INCRBYFLOAT_KEY", 100 * 1000);
   ASSERT_EQ(ret, 1);
   type_status.clear();
-  type_ttl = db.TTL("GP2_INCRBYFLOAT_KEY", &type_status);
-  ASSERT_LE(type_ttl[kStrings], 100);
-  ASSERT_GE(type_ttl[kStrings], 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(5 * 1000));
+  expired_ttl_sec = db.TTL("GP2_INCRBYFLOAT_KEY");
+  ASSERT_LE(expired_ttl_sec, 95);
+  ASSERT_GT(expired_ttl_sec, 90);
 
-  s = db.Incrbyfloat("GP2_INCRBYFLOAT_KEY", "10.22222", &value);
+  s = db.Incrbyfloat("GP2_INCRBYFLOAT_KEY", "10.22222", &value, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
-  ASSERT_EQ(value, "20.33333");
+  ASSERT_NEAR(std::stod(value), 20.33333, eps);
+  ASSERT_GE(expired_timestamp_millsec, expect_expired_timestamp_millsec);
+  ASSERT_LT(expired_timestamp_millsec, expect_expired_timestamp_millsec + 1000);
   s = db.Get("GP2_INCRBYFLOAT_KEY", &value);
-  ASSERT_EQ(value, "20.33333");
+  ASSERT_NEAR(std::stod(value), 20.33333, eps);
 
-  type_ttl = db.TTL("GP2_INCRBYFLOAT_KEY", &type_status);
-  ASSERT_LE(type_ttl[kStrings], 100);
-  ASSERT_GE(type_ttl[kStrings], 0);
+  std::this_thread::sleep_for(std::chrono::milliseconds(2 * 1000));
+  expired_ttl_sec = db.TTL("GP2_INCRBYFLOAT_KEY");
+  ASSERT_LE(expired_ttl_sec, 93);
+  ASSERT_GE(expired_ttl_sec, 90);
 
   // ***************** Group 3 Test *****************
   s = db.Set("GP3_INCRBYFLOAT_KEY", "10");
   ASSERT_TRUE(s.ok());
   make_expired(&db, "GP3_INCRBYFLOAT_KEY");
 
-  s = db.Incrbyfloat("GP3_INCRBYFLOAT_KEY", "0.123456", &value);
+  s = db.Incrbyfloat("GP3_INCRBYFLOAT_KEY", "0.123456", &value, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
-  ASSERT_EQ(value, "0.123456");
+  ASSERT_NEAR(std::stod(value), 0.123456, eps);
   s = db.Get("GP3_INCRBYFLOAT_KEY", &value);
-  ASSERT_EQ(value, "0.123456");
+  ASSERT_NEAR(std::stod(value), 0.123456, eps);
+  ASSERT_EQ(expired_timestamp_millsec, 0);
 
   type_status.clear();
-  type_ttl = db.TTL("GP3_INCRBYFLOAT_KEY", &type_status);
-  ASSERT_EQ(type_ttl[kStrings], -1);
+  expired_ttl_sec = db.TTL("GP3_INCRBYFLOAT_KEY");
+  ASSERT_EQ(expired_ttl_sec, -1);
 
   // ***************** Group 4 Test *****************
   s = db.Set("GP4_INCRBYFLOAT_KEY", "100.001");
   ASSERT_TRUE(s.ok());
 
-  s = db.Incrbyfloat("GP4_INCRBYFLOAT_KEY", "11.11", &value);
+  s = db.Incrbyfloat("GP4_INCRBYFLOAT_KEY", "11.11", &value, &expired_timestamp_millsec);
   ASSERT_TRUE(s.ok());
-  ASSERT_EQ(value, "111.111");
+  ASSERT_NEAR(std::stod(value), 111.111, eps);
   s = db.Get("GP4_INCRBYFLOAT_KEY", &value);
-  ASSERT_EQ(value, "111.111");
+  ASSERT_EQ(expired_timestamp_millsec, 0);
+  ASSERT_NEAR(std::stod(value), 111.111, eps);
 }
 
 // MGet
@@ -691,7 +731,8 @@ TEST_F(StringsTest, SetnxTest) {
 
 // Setvx
 TEST_F(StringsTest, SetvxTest) {
-  int32_t ret, ttl;
+  int32_t ret;
+  int32_t ttl;
   std::string value;
   // ***************** Group 1 Test *****************
   s = db.Set("GP1_SETVX_KEY", "GP1_SETVX_VALUE");
@@ -760,7 +801,7 @@ TEST_F(StringsTest, SetvxTest) {
   ASSERT_TRUE(s.ok());
 
   std::map<storage::DataType, Status> type_status;
-  ret = db.Expire("GP6_SETVX_KEY", 10, &type_status);
+  ret = db.Expire("GP6_SETVX_KEY", 10 * 1000);
   ASSERT_EQ(ret, 1);
 
   sleep(1);
@@ -768,7 +809,7 @@ TEST_F(StringsTest, SetvxTest) {
   ASSERT_LT(0, ttl);
   ASSERT_GT(10, ttl);
 
-  s = db.Setvx("GP6_SETVX_KEY", "GP6_SETVX_VALUE", "GP6_SETVX_NEW_VALUE", &ret, 20);
+  s = db.Setvx("GP6_SETVX_KEY", "GP6_SETVX_VALUE", "GP6_SETVX_NEW_VALUE", &ret, 20 * 1000);
   ASSERT_TRUE(s.ok());
   ASSERT_EQ(ret, 1);
 
@@ -784,7 +825,8 @@ TEST_F(StringsTest, SetvxTest) {
 
 // Delvx
 TEST_F(StringsTest, DelvxTest) {
-  int32_t ret, ttl;
+  int32_t ret;
+  int32_t ttl;
   std::string value;
   // ***************** Group 1 Test *****************
   s = db.Set("GP1_DELVX_KEY", "GP1_DELVX_VALUE");
@@ -847,7 +889,7 @@ TEST_F(StringsTest, SetrangeTest) {
 
   std::vector<std::string> keys{"SETRANGE_KEY"};
   std::map<storage::DataType, Status> type_status;
-  ret = db.Del(keys, &type_status);
+  ret = db.Del(keys);
   ASSERT_EQ(ret, 1);
   // If not exist, padded with zero-bytes to make offset fit
   s = db.Setrange("SETRANGE_KEY", 6, "REDIS", &ret);
@@ -936,71 +978,84 @@ TEST_F(StringsTest, BitPosTest) {
 
 // PKSetexAt
 TEST_F(StringsTest, PKSetexAtTest) {
-  int64_t unix_time;
-  rocksdb::Env::Default()->GetCurrentTime(&unix_time);
-  std::map<storage::DataType, int64_t> ttl_ret;
+  pstd::TimeType unix_time;
+  int64_t ttl_ret;
   std::map<storage::DataType, Status> type_status;
 
   // ***************** Group 1 Test *****************
-  s = db.PKSetexAt("GP1_PKSETEX_KEY", "VALUE", unix_time + 100);
+  unix_time = pstd::NowMillis();
+  s = db.PKSetexAt("GP1_PKSETEX_KEY", "VALUE", unix_time + 100*1000);
   ASSERT_TRUE(s.ok());
 
   type_status.clear();
   std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-  ttl_ret = db.TTL("GP1_PKSETEX_KEY", &type_status);
-  ASSERT_LE(ttl_ret[DataType::kStrings], 100);
-  ASSERT_GE(ttl_ret[DataType::kStrings], 90);
+  ttl_ret = db.TTL("GP1_PKSETEX_KEY");
+  ASSERT_LE(ttl_ret, 100);
+  ASSERT_GE(ttl_ret, 90);
 
   // ***************** Group 2 Test *****************
+  unix_time = pstd::NowMillis();
   s = db.Set("GP2_PKSETEX_KEY", "VALUE");
   ASSERT_TRUE(s.ok());
-  s = db.PKSetexAt("GP2_PKSETEX_KEY", "VALUE", unix_time + 100);
+  s = db.PKSetexAt("GP2_PKSETEX_KEY", "VALUE", unix_time + 100*1000);
   ASSERT_TRUE(s.ok());
 
   type_status.clear();
   std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-  ttl_ret = db.TTL("GP2_PKSETEX_KEY", &type_status);
-  ASSERT_LE(ttl_ret[DataType::kStrings], 100);
-  ASSERT_GE(ttl_ret[DataType::kStrings], 90);
+  ttl_ret = db.TTL("GP2_PKSETEX_KEY");
+  ASSERT_LE(ttl_ret, 100);
+  ASSERT_GE(ttl_ret, 90);
 
   // ***************** Group 3 Test *****************
-  s = db.PKSetexAt("GP3_PKSETEX_KEY", "VALUE", unix_time - 100);
+  unix_time = pstd::NowMillis();
+  s = db.PKSetexAt("GP3_PKSETEX_KEY", "VALUE", unix_time - 100*1000);
   ASSERT_TRUE(s.ok());
 
   type_status.clear();
-  ttl_ret = db.TTL("GP3_PKSETEX_KEY", &type_status);
-  ASSERT_EQ(ttl_ret[DataType::kStrings], -2);
+  ttl_ret = db.TTL("GP3_PKSETEX_KEY");
+  ASSERT_EQ(ttl_ret, -2);
 
   // ***************** Group 4 Test *****************
+  unix_time = pstd::NowMillis();
   s = db.Set("GP4_PKSETEX_KEY", "VALUE");
   ASSERT_TRUE(s.ok());
-  s = db.PKSetexAt("GP4_PKSETEX_KEY", "VALUE", unix_time - 100);
+  s = db.PKSetexAt("GP4_PKSETEX_KEY", "VALUE", unix_time - 100*1000);
   ASSERT_TRUE(s.ok());
 
   type_status.clear();
-  ttl_ret = db.TTL("GP4_PKSETEX_KEY", &type_status);
-  ASSERT_EQ(ttl_ret[DataType::kStrings], -2);
+  ttl_ret = db.TTL("GP4_PKSETEX_KEY");
+  ASSERT_EQ(ttl_ret, -2);
 
   // ***************** Group 5 Test *****************
+  unix_time = pstd::NowMillis();
   s = db.PKSetexAt("GP5_PKSETEX_KEY", "VALUE", -unix_time);
   ASSERT_TRUE(s.ok());
 
   type_status.clear();
-  ttl_ret = db.TTL("GP5_PKSETEX_KEY", &type_status);
-  ASSERT_EQ(ttl_ret[DataType::kStrings], -2);
+  ttl_ret = db.TTL("GP5_PKSETEX_KEY");
+  ASSERT_EQ(ttl_ret, -2);
 
   // ***************** Group 6 Test *****************
+  unix_time = pstd::NowMillis();
   s = db.Set("GP6_PKSETEX_KEY", "VALUE");
   ASSERT_TRUE(s.ok());
   s = db.PKSetexAt("GP6_PKSETEX_KEY", "VALUE", -unix_time);
   ASSERT_TRUE(s.ok());
 
   type_status.clear();
-  ttl_ret = db.TTL("GP6_PKSETEX_KEY", &type_status);
-  ASSERT_EQ(ttl_ret[DataType::kStrings], -2);
+  ttl_ret = db.TTL("GP6_PKSETEX_KEY");
+  ASSERT_EQ(ttl_ret, -2);
 }
 
 int main(int argc, char** argv) {
+  if (!pstd::FileExists("./log")) {
+    pstd::CreatePath("./log");
+  }
+  FLAGS_log_dir = "./log";
+  FLAGS_minloglevel = 0;
+  FLAGS_max_log_size = 1800;
+  FLAGS_logbufsecs = 0;
+  ::google::InitGoogleLogging("strings_test");
   ::testing::InitGoogleTest(&argc, argv);
   return RUN_ALL_TESTS();
 }

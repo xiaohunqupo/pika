@@ -18,6 +18,7 @@ enum class MemberType {
   kUint64T,
   kSizeT,
   kUnknown,
+  kBool,
 };
 
 struct MemberTypeInfo {
@@ -37,6 +38,7 @@ inline int offset_of(T1 T2::*member) {
 static std::unordered_map<std::string, MemberTypeInfo> mutable_db_options_member_type_info = {
     {"max_background_jobs", {offsetof(struct rocksdb::DBOptions, max_background_jobs), MemberType::kInt}},
     {"max_background_compactions", {offsetof(struct rocksdb::DBOptions, max_background_compactions), MemberType::kInt}},
+    {"max_subcompactions", {offsetof(struct rocksdb::DBOptions, max_subcompactions), MemberType::kInt}},
     // {"base_background_compactions", {offsetof(struct rocksdb::DBOptions, base_background_compactions),
     // MemberType::kInt}},
     {"max_open_files", {offsetof(struct rocksdb::DBOptions, max_open_files), MemberType::kInt}},
@@ -65,6 +67,11 @@ static std::unordered_map<std::string, MemberTypeInfo> mutable_cf_options_member
      {offset_of(&rocksdb::ColumnFamilyOptions::soft_pending_compaction_bytes_limit), MemberType::kUint64T}},
     {"hard_pending_compaction_bytes_limit",
      {offset_of(&rocksdb::ColumnFamilyOptions::hard_pending_compaction_bytes_limit), MemberType::kUint64T}},
+    {"disable_auto_compactions",
+     {offset_of(&rocksdb::ColumnFamilyOptions::disable_auto_compactions), MemberType::kBool}},
+    {"ttl", {offset_of(&rocksdb::AdvancedColumnFamilyOptions::ttl), MemberType::kUint64T}},
+    {"periodic_compaction_seconds",
+     {offset_of(&rocksdb::AdvancedColumnFamilyOptions::periodic_compaction_seconds), MemberType::kUint64T}},
 };
 
 extern bool ParseOptionMember(const MemberType& member_type, const std::string& value, char* member_address);

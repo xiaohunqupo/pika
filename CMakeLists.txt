@@ -22,11 +22,23 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   endif()
 endif()
 
-execute_process(COMMAND uname -p OUTPUT_VARIABLE HOST_ARCH)
-string(TOLOWER ${HOST_ARCH} HOST_ARCH)
+link_directories("/opt/rh/gcc-toolset-13/root/lib/gcc/x86_64-redhat-linux/13")
+
+############# You should enable sanitizer if you are developing pika #############
+# Uncomment the following two lines to enable AddressSanitizer to detect memory leaks and other memory-related bugs.
+#set(CMAKE_BUILD_TYPE "Debug")
+#set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=address  -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls")
+
+# [Notice] AddressSanitizer and ThreadSanitizer can not be enabled at the same time.
+
+# Uncomment the following two lines to enable ThreadSanitizer to detect data race and other thread-related issue.
+#set(CMAKE_BUILD_TYPE "Debug")
+#set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -fsanitize=thread -O0 -fno-omit-frame-pointer -fno-optimize-sibling-calls")
+
+string(TOLOWER ${CMAKE_HOST_SYSTEM_PROCESSOR} HOST_ARCH)
 
 if(NOT CMAKE_BUILD_TYPE)
-  set(CMAKE_BUILD_TYPE RElEASE)
+  set(CMAKE_BUILD_TYPE RELEASE)
 endif()
 
 string(TOUPPER ${CMAKE_BUILD_TYPE} BUILD_TYPE)
@@ -38,23 +50,27 @@ elseif(${BUILD_TYPE} STREQUAL MINSIZEREL)
 elseif(${BUILD_TYPE} STREQUAL RELWITHDEBINFO)
   set(LIB_BUILD_TYPE RELWITHDEBINFO)
 else()
-  set(LIB_BUILD_TYPE RElEASE)
-  set(CMAKE_CXX_FLAGS_RELEASE "-O2")
+  set(LIB_BUILD_TYPE RELEASE)
+  set(CMAKE_CXX_FLAGS_RELEASE "-O2 -g -DNDEBUG")
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Darwin")
    set(CMAKE_CXX_FLAGS "-pthread")
    add_definitions(-DOS_MACOSX)
+elseif (CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+    set(CMAKE_CXX_FLAGS "-pthread")
+    add_definitions(-DOS_FREEBSD)
 elseif(CMAKE_SYSTEM_NAME MATCHES "Linux")
    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-     set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++ -ldl -pthread")
+     set(CMAKE_EXE_LINKER_FLAGS "-stdlib=libc++ -fuse-ld=lld -lc++ -lc++abi ${CMAKE_EXE_LINKER_FLAGS}")
+     set(CMAKE_CXX_FLAGS "-stdlib=libc++ -pthread ${CMAKE_CXX_FLAGS}")
    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
      set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
      set(CMAKE_CXX_FLAGS "-pthread -Wl,--no-as-needed -ldl")
    endif()
    add_definitions(-DOS_LINUX)
 else()
-   message(FATAL_ERROR "only support linux or macOs")
+   message(FATAL_ERROR "only support linux or macOs or FreeBSD")
 endif()
 
 if(HOST_ARCH MATCHES "x86_64" OR HOST_ARCH MATCHES "i386")
@@ -62,6 +78,8 @@ if(HOST_ARCH MATCHES "x86_64" OR HOST_ARCH MATCHES "i386")
 elseif(HOST_ARCH MATCHES "arm")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv8-a+crc+crypto -moutline-atomics")
 endif()
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer")
 
 set(EP_BASE_SUFFIX "buildtrees")
 set_property(DIRECTORY PROPERTY EP_BASE ${CMAKE_CURRENT_SOURCE_DIR}/${EP_BASE_SUFFIX})
@@ -87,6 +105,32 @@ find_program(AUTOCONF
 
 if (${AUTOCONF} MATCHES AUTOCONF-NOTFOUND)
   message(FATAL_ERROR "not find autoconf on localhost")
+endif()
+
+#set(CLANG_SEARCH_PATH "/usr/local/bin" "/usr/bin" "/usr/local/opt/llvm/bin"
+#                      "/usr/local/opt/llvm@12/bin")
+find_program(CLANG_TIDY_BIN
+        NAMES clang-tidy clang-tidy-12
+        HINTS ${CLANG_SEARCH_PATH})
+if ("${CLANG_TIDY_BIN}" STREQUAL "CLANG_TIDY_BIN-NOTFOUND")
+  message(WARNING "couldn't find clang-tidy.")
+else ()
+  message(STATUS "found clang-tidy at ${CLANG_TIDY_BIN}")
+endif ()
+
+find_program(CLANG_APPLY_REPLACEMENTS_BIN
+        NAMES clang-apply-replacements clang-apply-replacements-12
+        HINTS ${CLANG_SEARCH_PATH})
+
+if ("${CLANG_APPLY_REPLACEMENTS_BIN}" STREQUAL "CLANG_APPLY_REPLACEMENTS_BIN-NOTFOUND")
+    message(WARNING "couldn't find clang-apply-replacements.")
+else ()
+    message(STATUS "found clang-apply-replacements at ${CLANG_APPLY_REPLACEMENTS_BIN}")
+endif ()
+
+option(WITH_COMMAND_DOCS "build with command docs support" OFF)
+if (WITH_COMMAND_DOCS)
+  add_definitions(-DWITH_COMMAND_DOCS)
 endif()
 
 include(protogen.cmake)
@@ -116,7 +160,7 @@ ExternalProject_Add(gtest
   make -j${CPU_CORE}
 )
 
-if(${OS_VERSION} MATCHES "CentOS")
+if(${OS_VERSION} MATCHES "Rocky" OR ${OS_VERSION} MATCHES "CentOS")
   set(GTEST_LIBRARY ${INSTALL_LIBDIR_64}/libgtest.a)
   set(GTEST_MAIN_LIBRARY ${INSTALL_LIBDIR_64}/libgtest_main.a)
   set(GMOCK_LIBRARY ${INSTALL_LIBDIR_64}/libgmock.a)
@@ -129,7 +173,6 @@ endif()
 set(GTEST_INCLUDE_DIR ${INSTALL_INCLUDEDIR})
 set(GTEST_MAIN_INCLUDE_DIR ${INSTALL_INCLUDEDIR})
 set(GMOCK_INCLUDE_DIR ${INSTALL_INCLUDEDIR})
-
 
 ExternalProject_Add(gflags
   URL
@@ -185,7 +228,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     LOG_INSTALL
     1
     CONFIGURE_COMMAND
-    <SOURCE_DIR>/configure --prefix=${STAGED_INSTALL_PREFIX} --enable-minidebuginfo=no --enable-zlibdebuginfo=no
+    <SOURCE_DIR>/configure --prefix=${STAGED_INSTALL_PREFIX} --enable-minidebuginfo=no --enable-zlibdebuginfo=no --enable-shared=no --with-pic
     BUILD_IN_SOURCE
     1
     BUILD_COMMAND
@@ -240,7 +283,11 @@ else()
   set(LIB_GLOG libglog.a)
 endif()
 
-set(GLOG_LIBRARY ${INSTALL_LIBDIR}/${LIB_GLOG})
+if(${OS_VERSION} MATCHES "Rocky" OR ${OS_VERSION} MATCHES "CentOS")
+  set(GLOG_LIBRARY ${INSTALL_LIBDIR_64}/${LIB_GLOG})
+else()
+  set(GLOG_LIBRARY ${INSTALL_LIBDIR}/${LIB_GLOG})
+endif()
 set(GLOG_INCLUDE_DIR ${INSTALL_INCLUDEDIR})
 
 ExternalProject_Add(snappy
@@ -271,7 +318,7 @@ ExternalProject_Add(snappy
   make -j${CPU_CORE}
 )
 
-if(${OS_VERSION} MATCHES "CentOS")
+if(${OS_VERSION} MATCHES "Rocky" OR ${OS_VERSION} MATCHES "CentOS")
   set(SNAPPY_LIBRARY ${INSTALL_LIBDIR_64}/libsnappy.a)
 else()
   set(SNAPPY_LIBRARY ${INSTALL_LIBDIR}/libsnappy.a)
@@ -309,7 +356,7 @@ ExternalProject_Add(zstd
   make -j${CPU_CORE}
 )
 
-if(${OS_VERSION} MATCHES "CentOS")
+if(${OS_VERSION} MATCHES "Rocky" OR ${OS_VERSION} MATCHES "CentOS")
   set(ZSTD_LIBRARY ${INSTALL_LIBDIR_64}/libzstd.a)
 else()
   set(ZSTD_LIBRARY ${INSTALL_LIBDIR}/libzstd.a)
@@ -348,7 +395,7 @@ else()
   set(LIB_FMT libfmt.a)
 endif()
 
-if(${OS_VERSION} MATCHES "CentOS")
+if(${OS_VERSION} MATCHES "Rocky" OR ${OS_VERSION} MATCHES "CentOS")
   set(FMT_LIBRARY ${INSTALL_LIBDIR_64}/${LIB_FMT})
 else()
   set(FMT_LIBRARY ${INSTALL_LIBDIR}/${LIB_FMT})
@@ -386,7 +433,7 @@ ExternalProject_Add(lz4
   make -j${CPU_CORE}
 )
 
-if(${OS_VERSION} MATCHES "CentOS")
+if(${OS_VERSION} MATCHES "Rocky" OR ${OS_VERSION} MATCHES "CentOS")
   set(LZ4_LIBRARY ${INSTALL_LIBDIR_64}/liblz4.a)
 else()
   set(LZ4_LIBRARY ${INSTALL_LIBDIR}/liblz4.a)
@@ -413,6 +460,7 @@ ExternalProject_Add(zlib
   CMAKE_ARGS
   -DCMAKE_INSTALL_PREFIX=${STAGED_INSTALL_PREFIX}
   -DCMAKE_BUILD_TYPE=${LIB_BUILD_TYPE}
+  -DZLIB_USE_STATIC_LIBS=ON
   BUILD_ALWAYS
   1
   BUILD_COMMAND
@@ -444,7 +492,9 @@ if(CMAKE_SYSTEM_NAME MATCHES "Linux")
     -DCMAKE_INSTALL_PREFIX=${STAGED_INSTALL_PREFIX}
     -DCMAKE_BUILD_TYPE=${LIB_BUILD_TYPE}
     -DGPERFTOOLS_BUILD_STATIC=ON
-    -DEFAULT_BUILD_MINIMAL=ON
+    -DDEFAULT_BUILD_MINIMAL=ON
+    -Dgperftools_build_benchmark=OFF
+    -DCMAKE_PREFIX_PATH=${INSTALL_LIBDIR}
     BUILD_COMMAND
     make -j${CPU_CORE}
   )
@@ -541,9 +591,9 @@ ExternalProject_Add(rocksdb
   ${LIBGPERF_NAME}
   ${LIBJEMALLOC_NAME}
   URL
-  https://github.com/facebook/rocksdb/archive/refs/tags/v8.1.1.tar.gz
+  https://github.com/facebook/rocksdb/archive/refs/tags/v8.7.3.tar.gz
   URL_HASH
-  MD5=3b4c97ee45df9c8a5517308d31ab008b
+  MD5=d57bc74c955c6271cfd9459e44c177b1
   DOWNLOAD_NO_PROGRESS
   1
   UPDATE_COMMAND
@@ -577,17 +627,46 @@ ExternalProject_Add(rocksdb
   -DWITH_GFLAGS=ON
   -DFAIL_ON_WARNINGS=OFF
   -DWITH_LIBURING=OFF
+  -DPORTABLE=1
   BUILD_COMMAND
   make -j${CPU_CORE}
 )
+
+ExternalProject_Add(rediscache
+  URL
+  https://github.com/pikiwidb/rediscache/archive/refs/tags/v1.0.7.tar.gz
+  URL_HASH
+  MD5=02c8aadc018dd8d4d3803cc420d1d75b
+  DOWNLOAD_NO_PROGRESS
+  1
+  UPDATE_COMMAND
+  ""
+  LOG_BUILD
+  1
+  BUILD_IN_SOURCE
+  1
+  SOURCE_SUBDIR
+  ""
+  CMAKE_ARGS
+  -DCMAKE_INSTALL_PREFIX=${STAGED_INSTALL_PREFIX}
+  -DCMAKE_INSTALL_INCLUDEDIR=${INSTALL_INCLUDEDIR}
+  -DCMAKE_INSTALL_LIBDIR=${INSTALL_LIBDIR}
+  -DCMAKE_BUILD_TYPE=Debug
+  BUILD_ALWAYS
+  1
+  BUILD_COMMAND
+  make -j${CPU_CORE}
+)
+set(REDISCACHE_INCLUDE_DIR ${INSTALL_INCLUDEDIR})
+set(REDISCACHE_LIBRARY ${INSTALL_LIBDIR}/librediscache.a)
 
 option(USE_PIKA_TOOLS "compile pika-tools" OFF)
 if (USE_PIKA_TOOLS)
   ExternalProject_Add(hiredis
     URL
-    https://github.com/vipshop/hiredis-vip/archive/refs/tags/0.3.0.tar.gz
+    https://github.com/redis/hiredis/archive/refs/tags/v1.2.0.tar.gz
     URL_HASH
-    MD5=e4d4a2928188b11f696d35ca1c52e9a4
+    MD5=119767d178cfa79718a80c83e0d0e849
     DOWNLOAD_NO_PROGRESS
     1
     UPDATE_COMMAND
@@ -609,7 +688,7 @@ if (USE_PIKA_TOOLS)
     INSTALL_COMMAND
     make PREFIX=${STAGED_INSTALL_PREFIX} -j${CPU_CORE} install
   )
-  set(HIREDIS_LIBRARY ${INSTALL_LIBDIR}/libhiredis_vip.a)
+  set(HIREDIS_LIBRARY ${INSTALL_LIBDIR}/libhiredis.a)
 
   ExternalProject_Add(bz2
     URL
@@ -640,7 +719,7 @@ if (USE_PIKA_TOOLS)
   set(BZ2_LIBRARY ${INSTALL_LIBDIR}/libbz2.a)
 endif()
 
-if(${OS_VERSION} MATCHES "CentOS")
+if(${OS_VERSION} MATCHES "Rocky" OR ${OS_VERSION} MATCHES "CentOS")
   set(ROCKSDB_LIBRARY ${INSTALL_LIBDIR_64}/librocksdb.a)
 else()
   set(ROCKSDB_LIBRARY ${INSTALL_LIBDIR}/librocksdb.a)
@@ -652,6 +731,7 @@ set(ROCKSDB_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/${EP_BASE_SUFFIX}/Source/rock
 add_subdirectory(src/pstd)
 add_subdirectory(src/net)
 add_subdirectory(src/storage)
+add_subdirectory(src/cache)
 if (USE_PIKA_TOOLS)
   add_subdirectory(tools)
 endif()
@@ -686,11 +766,13 @@ message("pika GIT_DATE = ${PIKA_GIT_DATE}")
 message("pika GIT_TAG = ${PIKA_GIT_TAG}")
 message("pika BUILD_DATE = ${PIKA_BUILD_DATE}")
 
-set(PIKA_BUILD_VERSION_CC ${CMAKE_BINARY_DIR}/pika_build_version.cc)
+set(PIKA_BUILD_VERSION_CC ${CMAKE_BINARY_DIR}/pika_build_version.cc
+        src/pika_cache_load_thread.cc
+        )
 message("PIKA_BUILD_VERSION_CC : " ${PIKA_BUILD_VERSION_CC})
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/src/build_version.cc.in ${PIKA_BUILD_VERSION_CC} @ONLY)
 
-set(PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/pika_inner_message.proto)
+set(PROTO_FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/pika_inner_message.proto ${CMAKE_CURRENT_SOURCE_DIR}/src/rsync_service.proto)
 custom_protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILES})
 message("pika PROTO_SRCS = ${PROTO_SRCS}")
 message("pika PROTO_HDRS = ${PROTO_HDRS}")
@@ -721,7 +803,10 @@ add_dependencies(${PROJECT_NAME}
   protobuf
   pstd
   net
-  storage)
+  rediscache
+  storage
+  cache
+)
 
 target_include_directories(${PROJECT_NAME}
   PUBLIC ${CMAKE_CURRENT_BINARY_DIR}
@@ -730,10 +815,11 @@ target_include_directories(${PROJECT_NAME}
 )
 
 target_link_libraries(${PROJECT_NAME}
+  cache
   storage
   net
   pstd
-  ${LIB_GLOG}
+  ${GLOG_LIBRARY}
   librocksdb.a
   ${LIB_PROTOBUF}
   ${LIB_GFLAGS}
@@ -742,7 +828,25 @@ target_link_libraries(${PROJECT_NAME}
   libzstd.a
   liblz4.a
   libz.a
+  librediscache.a
   ${LIBUNWIND_LIBRARY}
   ${JEMALLOC_LIBRARY})
 
 option(USE_SSL "Enable SSL support" OFF)
+add_custom_target(
+        clang-tidy
+        COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/run_clang_tidy.py
+        -clang-tidy-binary ${CLANG_TIDY_BIN}
+        -p ${CMAKE_BINARY_DIR}
+        -quiet
+        -extra-arg=-std=c++17
+    )
+
+add_custom_target(clang-tidy-fix
+    ${CMAKE_CURRENT_SOURCE_DIR}/run_clang_tidy.py
+    -clang-tidy-binary ${CLANG_TIDY_BIN}
+    -p ${CMAKE_BINARY_DIR}
+    -clang-apply-replacements-binary ${CLANG_APPLY_REPLACEMENTS_BIN}
+    -fix
+    -extra-arg=-std=c++17
+)

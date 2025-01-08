@@ -15,12 +15,11 @@
 
 #include "pstd/include/pstd_mutex.h"
 #include "pstd/include/xdebug.h"
-
 #include "net/include/net_define.h"
 #include "net/include/net_thread.h"
 #include "net/include/server_thread.h"
 #include "net/src/net_multiplexer.h"
-
+#include "net/src/dispatch_thread.h"
 namespace net {
 
 class NetItem;
@@ -32,7 +31,7 @@ class WorkerThread : public Thread {
  public:
   explicit WorkerThread(ConnFactory* conn_factory, ServerThread* server_thread, int queue_limit, int cron_interval = 0);
 
-  virtual ~WorkerThread();
+  ~WorkerThread() override;
 
   void set_keepalive_timeout(int timeout) { keepalive_timeout_ = timeout; }
 
@@ -42,15 +41,22 @@ class WorkerThread : public Thread {
 
   std::shared_ptr<NetConn> MoveConnOut(int fd);
 
-  bool MoveConnIn(std::shared_ptr<NetConn> conn, const NotifyType& notify_type, bool force);
+  bool MoveConnIn(const std::shared_ptr<NetConn>& conn, const NotifyType& notify_type, bool force);
 
   bool MoveConnIn(const NetItem& it, bool force);
 
   NetMultiplexer* net_multiplexer() { return net_multiplexer_.get(); }
   bool TryKillConn(const std::string& ip_port);
 
+  void ClearConnsRefAndOtherInfo(const std::shared_ptr<NetConn>& conn);
+
+  ServerThread* GetServerThread() { return server_thread_; }
+
   mutable pstd::RWMutex rwlock_; /* For external statistics */
   std::map<int, std::shared_ptr<NetConn>> conns_;
+  std::vector<std::shared_ptr<NetConn>> wait_to_close_conns_;
+  std::vector<std::shared_ptr<NetConn>> ready_to_close_conns_;
+
 
   void* private_data_ = nullptr;
 
@@ -66,14 +72,14 @@ class WorkerThread : public Thread {
 
   std::atomic<int> keepalive_timeout_;  // keepalive second
 
-  virtual void* ThreadMain() override;
+  void* ThreadMain() override;
   void DoCronTask();
 
   pstd::Mutex killer_mutex_;
   std::set<std::string> deleting_conn_ipport_;
 
   // clean conns
-  void CloseFd(std::shared_ptr<NetConn> conn);
+  void CloseFd(const std::shared_ptr<NetConn>& conn);
   void Cleanup();
 };  // class WorkerThread
 

@@ -8,31 +8,53 @@
 
 #include <string>
 
+#include "pstd/include/env.h"
+#include "storage/storage_define.h"
 #include "src/base_value_format.h"
 
 namespace storage {
 
+/*
+*| type | value |  version | reserve | cdate | timestamp |
+*|  1B  |       |    8B   |   16B    |   8B  |     8B    |
+*/
+// TODO(wangshaoyi): reformat encode, AppendTimestampAndVersion
 class BaseMetaValue : public InternalValue {
  public:
-  explicit BaseMetaValue(const Slice& user_value) : InternalValue(user_value) {}
-  size_t AppendTimestampAndVersion() override {
+  /*
+   * Constructing MetaValue requires passing in a type value
+   */
+  explicit BaseMetaValue(DataType type, const Slice& user_value) : InternalValue(type, user_value) {}
+  rocksdb::Slice Encode() override {
     size_t usize = user_value_.size();
-    char* dst = start_;
-    memcpy(dst, user_value_.data(), usize);
-    dst += usize;
-    EncodeFixed32(dst, version_);
-    dst += sizeof(int32_t);
-    EncodeFixed32(dst, timestamp_);
-    return usize + 2 * sizeof(int32_t);
+    size_t needed = usize + kVersionLength + kSuffixReserveLength + 2 * kTimestampLength + kTypeLength;
+    char* dst = ReAllocIfNeeded(needed);
+    memcpy(dst, &type_, sizeof(type_));
+    dst += sizeof(type_);
+    char* start_pos = dst;
+
+    memcpy(dst, user_value_.data(), user_value_.size());
+    dst += user_value_.size();
+    EncodeFixed64(dst, version_);
+    dst += sizeof(version_);
+    memcpy(dst, reserve_, sizeof(reserve_));
+    dst += sizeof(reserve_);
+    // The most significant bit is 1 for milliseconds and 0 for seconds.
+    // The previous data was stored in seconds, but the subsequent data was stored in milliseconds
+    uint64_t ctime = ctime_ > 0 ? (ctime_ | (1ULL << 63)) : 0;
+    EncodeFixed64(dst, ctime);
+    dst += sizeof(ctime_);
+    uint64_t etime = etime_ > 0 ? (etime_ | (1ULL << 63)) : 0;
+    EncodeFixed64(dst, etime);
+    return {start_, needed};
   }
 
-  int32_t UpdateVersion() {
-    int64_t unix_time;
-    rocksdb::Env::Default()->GetCurrentTime(&unix_time);
-    if (version_ >= static_cast<int32_t>(unix_time)) {
+  uint64_t UpdateVersion() {
+    pstd::TimeType unix_time = pstd::NowMillis();
+    if (version_ >= unix_time) {
       version_++;
     } else {
-      version_ = static_cast<int32_t>(unix_time);
+      version_ = unix_time;
     }
     return version_;
   }
@@ -43,90 +65,161 @@ class ParsedBaseMetaValue : public ParsedInternalValue {
   // Use this constructor after rocksdb::DB::Get();
   explicit ParsedBaseMetaValue(std::string* internal_value_str) : ParsedInternalValue(internal_value_str) {
     if (internal_value_str->size() >= kBaseMetaValueSuffixLength) {
-      user_value_ = Slice(internal_value_str->data(), internal_value_str->size() - kBaseMetaValueSuffixLength);
-      version_ = DecodeFixed32(internal_value_str->data() + internal_value_str->size() - sizeof(int32_t) * 2);
-      timestamp_ = DecodeFixed32(internal_value_str->data() + internal_value_str->size() - sizeof(int32_t));
+      size_t offset = 0;
+      type_ = static_cast<DataType>(static_cast<uint8_t>((*internal_value_str)[0]));
+      offset += kTypeLength;
+      user_value_ = Slice(internal_value_str->data() + offset,
+                             internal_value_str->size() - kBaseMetaValueSuffixLength - offset);
+      offset += user_value_.size();
+      version_ = DecodeFixed64(internal_value_str->data() + offset);
+      offset += sizeof(version_);
+      memcpy(reserve_, internal_value_str->data() + offset, sizeof(reserve_));
+      offset += sizeof(reserve_);
+      uint64_t ctime = DecodeFixed64(internal_value_str->data() + offset);
+      offset += sizeof(ctime_);
+      uint64_t etime = DecodeFixed64(internal_value_str->data() + offset);
+
+      ctime_ = (ctime & ~(1ULL << 63));
+      // if ctime_==ctime, means ctime_ storaged in seconds
+      if (ctime_ == ctime) {
+        ctime_ *= 1000;
+      }
+      etime_ = (etime & ~(1ULL << 63));
+      // if etime_==etime, means etime_ storaged in seconds
+      if (etime == etime_) {
+        etime_ *= 1000;
+      }
     }
-    count_ = DecodeFixed32(internal_value_str->data());
+    count_ = DecodeFixed32(internal_value_str->data() + kTypeLength);
   }
 
   // Use this constructor in rocksdb::CompactionFilter::Filter();
   explicit ParsedBaseMetaValue(const Slice& internal_value_slice) : ParsedInternalValue(internal_value_slice) {
     if (internal_value_slice.size() >= kBaseMetaValueSuffixLength) {
-      user_value_ = Slice(internal_value_slice.data(), internal_value_slice.size() - kBaseMetaValueSuffixLength);
-      version_ = DecodeFixed32(internal_value_slice.data() + internal_value_slice.size() - sizeof(int32_t) * 2);
-      timestamp_ = DecodeFixed32(internal_value_slice.data() + internal_value_slice.size() - sizeof(int32_t));
+      size_t offset = 0;
+      type_ = static_cast<DataType>(static_cast<uint8_t>(internal_value_slice[0]));
+      offset += kTypeLength;
+      user_value_ = Slice(internal_value_slice.data() + offset,
+                          internal_value_slice.size() - kBaseMetaValueSuffixLength - offset);
+      offset += user_value_.size();
+      version_ = DecodeFixed64(internal_value_slice.data() + offset);
+      offset += sizeof(uint64_t);
+      memcpy(reserve_, internal_value_slice.data() + offset, sizeof(reserve_));
+      offset += sizeof(reserve_);
+      uint64_t ctime = DecodeFixed64(internal_value_slice.data() + offset);
+      offset += sizeof(ctime_);
+      uint64_t etime = DecodeFixed64(internal_value_slice.data() + offset);
+
+      ctime_ = (ctime & ~(1ULL << 63));
+      // if ctime_!=ctime, means ctime_ storaged in seconds
+      if (ctime_ == ctime) {
+        ctime_ *= 1000;
+      }
+      etime_ = (etime & ~(1ULL << 63));
+      // if etime_!=etime, means etime_ storaged in seconds
+      if (etime == etime_) {
+        etime_ *= 1000;
+      }
     }
-    count_ = DecodeFixed32(internal_value_slice.data());
+    count_ = DecodeFixed32(internal_value_slice.data() + kTypeLength);
   }
 
   void StripSuffix() override {
-    if (value_ != nullptr) {
+    if (value_) {
       value_->erase(value_->size() - kBaseMetaValueSuffixLength, kBaseMetaValueSuffixLength);
     }
   }
 
   void SetVersionToValue() override {
-    if (value_ != nullptr) {
+    if (value_) {
       char* dst = const_cast<char*>(value_->data()) + value_->size() - kBaseMetaValueSuffixLength;
-      EncodeFixed32(dst, version_);
+      EncodeFixed64(dst, version_);
     }
   }
 
-  void SetTimestampToValue() override {
-    if (value_ != nullptr) {
-      char* dst = const_cast<char*>(value_->data()) + value_->size() - sizeof(int32_t);
-      EncodeFixed32(dst, timestamp_);
+  void SetCtimeToValue() override {
+    if (value_) {
+      char* dst = const_cast<char*>(value_->data()) + value_->size() - 2 * kTimestampLength;
+      uint64_t ctime = ctime_ > 0 ? (ctime_ | (1ULL << 63)) : 0;
+      EncodeFixed64(dst, ctime);
     }
   }
-  static const size_t kBaseMetaValueSuffixLength = 2 * sizeof(int32_t);
 
-  int32_t InitialMetaValue() {
-    this->set_count(0);
-    this->set_timestamp(0);
+  void SetEtimeToValue() override {
+    if (value_) {
+      char* dst = const_cast<char*>(value_->data()) + value_->size() - kTimestampLength;
+      uint64_t etime = etime_ > 0 ? (etime_ | (1ULL << 63)) : 0;
+      EncodeFixed64(dst, etime);
+    }
+  }
+
+  uint64_t InitialMetaValue() {
+    this->SetCount(0);
+    this->SetEtime(0);
+    this->SetCtime(0);
     return this->UpdateVersion();
   }
 
-  int32_t count() { return count_; }
+  bool IsValid() override {
+    return !IsStale() && Count() != 0;
+  }
 
-  void set_count(int32_t count) {
-    count_ = count;
-    if (value_ != nullptr) {
-      char* dst = const_cast<char*>(value_->data());
-      EncodeFixed32(dst, count_);
+  bool check_set_count(size_t count) {
+    if (count > INT32_MAX) {
+      return false;
     }
+    return true;
+  }
+
+  int32_t Count() { return count_; }
+
+  void SetCount(int32_t count) {
+    count_ = count;
+    if (value_) {
+      char* dst = const_cast<char*>(value_->data());
+      EncodeFixed32(dst + kTypeLength, count_);
+    }
+  }
+
+  bool CheckModifyCount(int32_t delta) {
+    int64_t count = count_;
+    count += delta;
+    if (count < 0 || count > INT32_MAX) {
+      return false;
+    }
+    return true;
   }
 
   void ModifyCount(int32_t delta) {
     count_ += delta;
-    if (value_ != nullptr) {
+    if (value_) {
       char* dst = const_cast<char*>(value_->data());
-      EncodeFixed32(dst, count_);
+      EncodeFixed32(dst + kTypeLength, count_);
     }
   }
 
-  int32_t UpdateVersion() {
-    int64_t unix_time;
-    rocksdb::Env::Default()->GetCurrentTime(&unix_time);
-    if (version_ >= static_cast<int32_t>(unix_time)) {
+  uint64_t UpdateVersion() {
+    pstd::TimeType unix_time = pstd::NowMillis();
+    if (version_ >= unix_time) {
       version_++;
     } else {
-      version_ = static_cast<int32_t>(unix_time);
+      version_ = unix_time;
     }
     SetVersionToValue();
     return version_;
   }
 
  private:
+  static const size_t kBaseMetaValueSuffixLength = kVersionLength + kSuffixReserveLength + 2 * kTimestampLength;
   int32_t count_ = 0;
 };
 
-typedef BaseMetaValue HashesMetaValue;
-typedef ParsedBaseMetaValue ParsedHashesMetaValue;
-typedef BaseMetaValue SetsMetaValue;
-typedef ParsedBaseMetaValue ParsedSetsMetaValue;
-typedef BaseMetaValue ZSetsMetaValue;
-typedef ParsedBaseMetaValue ParsedZSetsMetaValue;
+using HashesMetaValue = BaseMetaValue;
+using ParsedHashesMetaValue = ParsedBaseMetaValue;
+using SetsMetaValue = BaseMetaValue;
+using ParsedSetsMetaValue = ParsedBaseMetaValue;
+using ZSetsMetaValue = BaseMetaValue;
+using ParsedZSetsMetaValue = ParsedBaseMetaValue;
 
 }  //  namespace storage
 #endif  // SRC_BASE_META_VALUE_FORMAT_H_

@@ -3,14 +3,13 @@
 // LICENSE file in the root directory of this source tree. An additional grant
 // of patent rights can be found in the PATENTS file in the same directory.
 
-#include "include/pika_auxiliary_thread.h"
-
 #include "include/pika_define.h"
+#include "include/pika_auxiliary_thread.h"
 #include "include/pika_rm.h"
 #include "include/pika_server.h"
 
 extern PikaServer* g_pika_server;
-extern PikaReplicaManager* g_pika_rm;
+extern std::unique_ptr<PikaReplicaManager> g_pika_rm;
 
 using namespace std::chrono_literals;
 
@@ -24,9 +23,10 @@ void* PikaAuxiliaryThread::ThreadMain() {
     if (g_pika_server->ShouldMetaSync()) {
       g_pika_rm->SendMetaSyncRequest();
     } else if (g_pika_server->MetaSyncDone()) {
-      g_pika_rm->RunSyncSlavePartitionStateMachine();
+      g_pika_rm->RunSyncSlaveDBStateMachine();
     }
-    Status s = g_pika_rm->CheckSyncTimeout(pstd::NowMicros());
+
+    pstd::Status s = g_pika_rm->CheckSyncTimeout(pstd::NowMicros());
     if (!s.ok()) {
       LOG(WARNING) << s.ToString();
     }
@@ -40,7 +40,7 @@ void* PikaAuxiliaryThread::ThreadMain() {
     }
     // send to peer
     int res = g_pika_server->SendToPeer();
-    if (!res) {
+    if (res == 0) {
       // sleep 100 ms
       std::unique_lock lock(mu_);
       cv_.wait_for(lock, 100ms);

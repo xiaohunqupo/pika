@@ -13,8 +13,6 @@ import (
 	"pika/codis/v2/pkg/utils/redis"
 )
 
-const MaxSlotNum = models.MaxSlotNum
-
 type Router struct {
 	mu sync.RWMutex
 
@@ -22,7 +20,7 @@ type Router struct {
 		primary *sharedBackendConnPool
 		replica *sharedBackendConnPool
 	}
-	slots [MaxSlotNum]Slot
+	slots []Slot
 
 	config *Config
 	online bool
@@ -31,8 +29,9 @@ type Router struct {
 
 func NewRouter(config *Config) *Router {
 	s := &Router{config: config}
-	s.pool.primary = newSharedBackendConnPool(config, config.BackendPrimaryParallel)
-	s.pool.replica = newSharedBackendConnPool(config, config.BackendReplicaParallel)
+	s.pool.primary = newSharedBackendConnPool(config, config.BackendPrimaryParallel, config.BackendPrimaryQuick)
+	s.pool.replica = newSharedBackendConnPool(config, config.BackendReplicaParallel, config.BackendReplicaQuick)
+	s.slots = make([]Slot, models.GetMaxSlotNum())
 	for i := range s.slots {
 		s.slots[i].id = i
 		s.slots[i].method = &forwardSync{}
@@ -65,7 +64,7 @@ func (s *Router) Close() {
 func (s *Router) GetSlots() []*models.Slot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	slots := make([]*models.Slot, MaxSlotNum)
+	slots := make([]*models.Slot, models.GetMaxSlotNum())
 	for i := range s.slots {
 		slots[i] = s.slots[i].snapshot()
 	}
@@ -75,7 +74,7 @@ func (s *Router) GetSlots() []*models.Slot {
 func (s *Router) GetSlot(id int) *models.Slot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if id < 0 || id >= MaxSlotNum {
+	if id < 0 || id >= models.GetMaxSlotNum() {
 		return nil
 	}
 	slot := &s.slots[id]
@@ -105,7 +104,7 @@ func (s *Router) FillSlot(m *models.Slot) error {
 	if s.closed {
 		return ErrClosedRouter
 	}
-	if m.Id < 0 || m.Id >= MaxSlotNum {
+	if m.Id < 0 || m.Id >= models.GetMaxSlotNum() {
 		return ErrInvalidSlotId
 	}
 	var method forwardMethod
@@ -138,13 +137,13 @@ func (s *Router) isOnline() bool {
 
 func (s *Router) dispatch(r *Request) error {
 	hkey := getHashKey(r.Multi, r.OpStr)
-	var id = Hash(hkey) % MaxSlotNum
+	var id = Hash(hkey) % uint32(models.GetMaxSlotNum())
 	slot := &s.slots[id]
 	return slot.forward(r, hkey)
 }
 
 func (s *Router) dispatchSlot(r *Request, id int) error {
-	if id < 0 || id >= MaxSlotNum {
+	if id < 0 || id >= models.GetMaxSlotNum() {
 		return ErrInvalidSlotId
 	}
 	slot := &s.slots[id]
@@ -154,11 +153,11 @@ func (s *Router) dispatchSlot(r *Request, id int) error {
 func (s *Router) dispatchAddr(r *Request, addr string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if bc := s.pool.primary.Get(addr).BackendConn(r.Database, r.Seed16(), false); bc != nil {
+	if bc := s.pool.primary.Get(addr).BackendConn(r.Database, r.Seed16(), false, r.OpFlag.IsQuick()); bc != nil {
 		bc.PushBack(r)
 		return true
 	}
-	if bc := s.pool.replica.Get(addr).BackendConn(r.Database, r.Seed16(), false); bc != nil {
+	if bc := s.pool.replica.Get(addr).BackendConn(r.Database, r.Seed16(), false, r.OpFlag.IsQuick()); bc != nil {
 		bc.PushBack(r)
 		return true
 	}
@@ -230,6 +229,16 @@ func (s *Router) fillSlot(m *models.Slot, switched bool, method forwardMethod) {
 			}
 		}
 	}
+}
+
+// SetPrimaryQuickConn Set the number of quick connections.
+func (s *Router) SetPrimaryQuickConn(quick int) {
+	s.pool.primary.SetQuickConn(quick)
+}
+
+// SetReplicaQuickConn Set the number of quick connections.
+func (s *Router) SetReplicaQuickConn(quick int) {
+	s.pool.replica.SetQuickConn(quick)
 }
 
 func (s *Router) SwitchMasters(masters map[int]string) error {

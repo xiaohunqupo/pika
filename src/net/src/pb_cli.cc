@@ -10,29 +10,32 @@
 
 #include "net/include/net_cli.h"
 #include "net/include/net_define.h"
+#include "pstd/include/pstd_status.h"
 #include "pstd/include/xdebug.h"
+#include "pstd/include/noncopyable.h"
+
+
+using pstd::Status;
 
 namespace net {
 
 // Default PBCli is block IO;
 class PbCli : public NetCli {
  public:
-  PbCli(const std::string& ip, const int port);
-  virtual ~PbCli();
+  PbCli(const std::string& ip, int port);
+  ~PbCli() override;
 
   // msg should have been parsed
-  virtual Status Send(void* msg_req) override;
+  Status Send(void* msg_req) override;
 
   // Read, parse and store the reply
-  virtual Status Recv(void* msg_res) override;
+  Status Recv(void* msg_res) override;
 
  private:
   // BuildWbuf need to access rbuf_, wbuf_;
   char* rbuf_;
   char* wbuf_;
 
-  PbCli(const PbCli&);
-  void operator=(const PbCli&);
 };
 
 PbCli::PbCli(const std::string& ip, const int port) : NetCli(ip, port) {
@@ -46,19 +49,19 @@ PbCli::~PbCli() {
 }
 
 Status PbCli::Send(void* msg) {
-  google::protobuf::Message* req = reinterpret_cast<google::protobuf::Message*>(msg);
+  auto req = reinterpret_cast<google::protobuf::Message*>(msg);
 
-  int wbuf_len = req->ByteSizeLong();
-  req->SerializeToArray(wbuf_ + kCommandHeaderLength, wbuf_len);
-  uint32_t len = htonl(wbuf_len);
-  memcpy(wbuf_, &len, sizeof(uint32_t));
+  size_t wbuf_len = req->ByteSizeLong();
+  req->SerializeToArray(wbuf_ + kCommandHeaderLength, static_cast<int32_t>(wbuf_len));
+  uint32_t len = htonl(static_cast<uint32_t>(wbuf_len));
+  memcpy(wbuf_, &len, sizeof(len));
   wbuf_len += kCommandHeaderLength;
 
   return NetCli::SendRaw(wbuf_, wbuf_len);
 }
 
 Status PbCli::Recv(void* msg_res) {
-  google::protobuf::Message* res = reinterpret_cast<google::protobuf::Message*>(msg_res);
+  auto res = reinterpret_cast<google::protobuf::Message*>(msg_res);
 
   // Read Header
   size_t read_len = kCommandHeaderLength;
@@ -77,7 +80,7 @@ Status PbCli::Recv(void* msg_res) {
     return s;
   }
 
-  if (!res->ParseFromArray(rbuf_, packet_len)) {
+  if (!res->ParseFromArray(rbuf_, static_cast<int32_t>(packet_len))) {
     return Status::Corruption("PbCli::Recv Protobuf ParseFromArray error");
   }
   return Status::OK();

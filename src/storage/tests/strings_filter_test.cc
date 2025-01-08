@@ -15,19 +15,18 @@ using namespace storage;
 // Filter
 TEST(StringsFilterTest, FilterTest) {
   std::string new_value;
-  bool is_stale, value_changed;
-  StringsFilter* filter = new StringsFilter;
+  bool is_stale;
+  bool value_changed;
+  auto filter = std::make_unique<StringsFilter>();
 
-  int32_t ttl = 1;
+  int64_t ttl = 1;
   StringsValue strings_value("FILTER_VALUE");
-  strings_value.SetRelativeTimestamp(ttl);
+  strings_value.SetRelativeTimeInMillsec(ttl);
   is_stale = filter->Filter(0, "FILTER_KEY", strings_value.Encode(), &new_value, &value_changed);
   ASSERT_FALSE(is_stale);
   std::this_thread::sleep_for(std::chrono::milliseconds(2000));
   is_stale = filter->Filter(0, "FILTER_KEY", strings_value.Encode(), &new_value, &value_changed);
   ASSERT_TRUE(is_stale);
-
-  delete filter;
 }
 
 int main(int argc, char** argv) {

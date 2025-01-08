@@ -49,8 +49,8 @@ instance-mode : classic
 # 经典模式下下指定db的数量，使用方式和redis一致
 databases : 1
 
-# 分片模式下每一个table中默认的slot数量
-default-slot-num：16
+# 和 codis 一起使用时，slot 的数量
+default-slot-num : 1024
 
 # 定义一个副本组又多少个从副本，目前支持的配置选项范围[0, 1, 2, 3, 4], 0代表不开启此功能
 replication-num : 0
@@ -142,8 +142,7 @@ identify-binlog-type : new
 # 主从同步流量控制的的窗口，主从高延迟情形下可以通过提高该参数提高同步性能。默认值9000最大值90000。
 sync-window-size : 9000
 
-# 处理客户端连接请求的最大缓存大小，可配置的数值为67108864(64MB) 或 268435456(256MB) 或 536870912(512MB)
-# 默认是268435456(256MB)，需要注意的是主从的配置需要一致。
+# 处理客户端连接请求的最大缓存大小，默认是268435456(256MB)，范围为[64MB, 1GB]，需要注意的是主从的配置需要一致。
 # 单条命令超过此buffer大小，服务端会自动关闭与客户端的连接。
 max-conn-rbuf-size : 268435456
 
@@ -163,6 +162,10 @@ max-background-flushes : 1
 
 # 指定后台压缩线程数量, 默认为1, 范围为[1, 4]
 max-background-compactions : 1
+
+# 指定后台线程数量, 默认为1, 范围为[1, 4]
+max-background-jobs : 1
+
 
 # DB可以使用的打开文件的数量, 默认为5000
 max-cache-files : 5000

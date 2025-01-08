@@ -15,11 +15,11 @@
 using pstd::Slice;
 using pstd::Status;
 
-std::string NewFileName(const std::string name, const uint32_t current);
+std::string NewFileName(const std::string& name, const uint32_t current);
 
 class Version {
  public:
-  Version(pstd::RWFile* save);
+  Version(std::shared_ptr<pstd::RWFile> save);
   ~Version();
 
   Status Init();
@@ -39,7 +39,7 @@ class Version {
   }
 
  private:
-  pstd::RWFile* save_;
+  std::shared_ptr<pstd::RWFile> save_;
 
   // No copying allowed;
   Version(const Version&);
@@ -48,7 +48,7 @@ class Version {
 
 class Binlog {
  public:
-  Binlog(const std::string& Binlog_path, const int file_size = 100 * 1024 * 1024);
+  Binlog(std::string  Binlog_path, const int file_size = 100 * 1024 * 1024);
   ~Binlog();
 
   void Lock() { mutex_.lock(); }
@@ -61,11 +61,11 @@ class Binlog {
   /*
    * Set Producer pro_num and pro_offset with lock
    */
-  Status SetProducerStatus(uint32_t filenum, uint64_t pro_offset);
+  Status SetProducerStatus(uint32_t pro_num, uint64_t pro_offset);
 
   static Status AppendBlank(pstd::WritableFile* file, uint64_t len);
 
-  pstd::WritableFile* queue() { return queue_; }
+  // pstd::WritableFile* queue() { return queue_; }
 
   uint64_t file_size() { return file_size_; }
 
@@ -83,9 +83,9 @@ class Binlog {
   uint32_t consumer_num_;
   uint64_t item_num_;
 
-  Version* version_;
-  pstd::WritableFile* queue_;
-  pstd::RWFile* versionfile_;
+  std::unique_ptr<Version> version_;
+  std::unique_ptr<pstd::WritableFile> queue_;
+  std::shared_ptr<pstd::RWFile> versionfile_;
 
   pstd::Mutex mutex_;
 

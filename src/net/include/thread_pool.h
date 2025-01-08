@@ -16,11 +16,12 @@
 
 namespace net {
 
-typedef void (*TaskFunc)(void*);
+using TaskFunc = void (*)(void *);
 
 struct Task {
-  TaskFunc func;
-  void* arg;
+  Task() = default;
+  TaskFunc func = nullptr;
+  void* arg = nullptr;
   Task(TaskFunc _func, void* _arg) : func(_func), arg(_arg) {}
 };
 
@@ -32,7 +33,7 @@ struct TimeTask {
   bool operator<(const TimeTask& task) const { return exec_time > task.exec_time; }
 };
 
-class ThreadPool {
+class ThreadPool : public pstd::noncopyable {
  public:
   class Worker {
    public:
@@ -47,14 +48,9 @@ class ThreadPool {
     std::atomic<bool> start_;
     ThreadPool* const thread_pool_;
     std::string worker_name_;
-    /*
-     * No allowed copy and copy assign
-     */
-    Worker(const Worker&);
-    void operator=(const Worker&);
   };
 
-  explicit ThreadPool(size_t worker_num, size_t max_queue_size, const std::string& thread_pool_name = "ThreadPool");
+  explicit ThreadPool(size_t worker_num, size_t max_queue_size, std::string  thread_pool_name = "ThreadPool");
   virtual ~ThreadPool();
 
   int start_thread_pool();
@@ -86,11 +82,6 @@ class ThreadPool {
   pstd::CondVar rsignal_;
   pstd::CondVar wsignal_;
 
-  /*
-   * No allowed copy and copy assign
-   */
-  ThreadPool(const ThreadPool&);
-  void operator=(const ThreadPool&);
 };
 
 }  // namespace net

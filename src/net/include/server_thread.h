@@ -20,6 +20,7 @@
 #include "net/include/net_define.h"
 #include "net/include/net_thread.h"
 #include "net/src/net_multiplexer.h"
+#include "pstd/include/env.h"
 #include "pstd/include/pstd_mutex.h"
 #include "pstd/include/pstd_status.h"
 
@@ -44,8 +45,8 @@ class WorkerThread;
  */
 class ServerHandle {
  public:
-  ServerHandle() {}
-  virtual ~ServerHandle() {}
+  ServerHandle() = default;
+  virtual ~ServerHandle() = default;
 
   /*
    *  CronHandle() will be invoked on every cron_interval elapsed.
@@ -127,11 +128,13 @@ class ServerThread : public Thread {
 
   int SetTcpNoDelay(int connfd);
 
+  void SetLogNetActivities(bool value);
+
   /*
    * StartThread will return the error code as pthread_create
    * Return 0 if success
    */
-  virtual int StartThread() override;
+  int StartThread() override;
 
   virtual void set_keepalive_timeout(int timeout) = 0;
 
@@ -149,6 +152,8 @@ class ServerThread : public Thread {
   // Move into server thread
   virtual void MoveConnIn(std::shared_ptr<NetConn> conn, const NotifyType& type) = 0;
 
+  void set_thread_name(const std::string& name) override { Thread::set_thread_name(name); }
+
   virtual void KillAllConns() = 0;
   virtual bool KillConn(const std::string& ip_port) = 0;
 
@@ -156,13 +161,15 @@ class ServerThread : public Thread {
 
   virtual void SetQueueLimit(int queue_limit) {}
 
-  virtual ~ServerThread();
+  ~ServerThread() override;
 
  protected:
   /*
    * The event handler
    */
   std::unique_ptr<NetMultiplexer> net_multiplexer_;
+
+  std::atomic<bool> log_net_activities_{false};
 
  private:
   friend class HolyThread;
@@ -174,6 +181,7 @@ class ServerThread : public Thread {
 
   // process events in notify_queue
   virtual void ProcessNotifyEvents(const NetFiredEvent* pfe);
+  
 
   const ServerHandle* handle_;
   bool own_handle_ = false;
@@ -188,11 +196,11 @@ class ServerThread : public Thread {
    */
   int port_ = -1;
   std::set<std::string> ips_;
-  std::vector<ServerSocket*> server_sockets_;
+  std::vector<std::shared_ptr<ServerSocket>> server_sockets_;
   std::set<int32_t> server_fds_;
 
   virtual int InitHandle();
-  virtual void* ThreadMain() override;
+  void* ThreadMain() override;
   /*
    * The server event handle
    */

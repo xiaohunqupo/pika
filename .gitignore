@@ -40,6 +40,7 @@ output/
 # DB
 db/
 dump/
+src/dbsync/
 
 # third party
 gdb.txt
@@ -47,6 +48,7 @@ tags
 
 # IDE
 .vscode
+.DS_Store
 
 # generate
 make_config.mk
@@ -63,6 +65,7 @@ src/build_version.cc
 build/
 buildtrees
 deps
+pkg
 
 #develop container
 .devcontainer
@@ -70,3 +73,4 @@ deps
 # include codis fe javascript lib files
 !codis/cmd/fe/assets/**
 
+tests/tmp

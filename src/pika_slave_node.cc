@@ -4,10 +4,11 @@
 // of patent rights can be found in the PATENTS file in the same directory.
 
 #include "include/pika_slave_node.h"
-
 #include "include/pika_conf.h"
 
-extern PikaConf* g_pika_conf;
+using pstd::Status;
+
+extern std::unique_ptr<PikaConf> g_pika_conf;
 
 /* SyncWindow */
 
@@ -17,7 +18,8 @@ void SyncWindow::Push(const SyncWinItem& item) {
 }
 
 bool SyncWindow::Update(const SyncWinItem& start_item, const SyncWinItem& end_item, LogOffset* acked_offset) {
-  size_t start_pos = win_.size(), end_pos = win_.size();
+  size_t start_pos = win_.size();
+  size_t end_pos = win_.size();
   for (size_t i = 0; i < win_.size(); ++i) {
     if (win_[i] == start_item) {
       start_pos = i;
@@ -51,25 +53,22 @@ bool SyncWindow::Update(const SyncWinItem& start_item, const SyncWinItem& end_it
 
 int SyncWindow::Remaining() {
   std::size_t remaining_size = g_pika_conf->sync_window_size() - win_.size();
-  return remaining_size > 0 ? remaining_size : 0;
+  return static_cast<int>(remaining_size > 0 ? remaining_size : 0);
 }
 
 /* SlaveNode */
 
-SlaveNode::SlaveNode(const std::string& ip, int port, const std::string& table_name, uint32_t partition_id,
-                     int session_id)
-    : RmNode(ip, port, table_name, partition_id, session_id),
-      slave_state(kSlaveNotSync),
-      b_state(kNotSync),
-      sent_offset(),
-      acked_offset() {}
+SlaveNode::SlaveNode(const std::string& ip, int port, const std::string& db_name, int session_id)
+    : RmNode(ip, port, db_name, session_id)
 
-SlaveNode::~SlaveNode() {}
+      {}
+
+SlaveNode::~SlaveNode() = default;
 
 Status SlaveNode::InitBinlogFileReader(const std::shared_ptr<Binlog>& binlog, const BinlogOffset& offset) {
   binlog_reader = std::make_shared<PikaBinlogReader>();
   int res = binlog_reader->Seek(binlog, offset.filenum, offset.offset);
-  if (res) {
+  if (res != 0) {
     return Status::Corruption(ToString() + "  binlog reader init failed");
   }
   return Status::OK();

@@ -17,12 +17,10 @@
 
 #include "pstd/include/mutex.h"
 
-namespace pstd {
-
-namespace lock {
+namespace pstd::lock {
 
 struct LockMapStripe {
-  explicit LockMapStripe(std::shared_ptr<MutexFactory> factory) {
+  explicit LockMapStripe(const std::shared_ptr<MutexFactory>& factory) {
     stripe_mutex = factory->AllocateMutex();
     stripe_cv = factory->AllocateCondVar();
     assert(stripe_mutex);
@@ -41,19 +39,15 @@ struct LockMapStripe {
 
 // Map of #num_stripes LockMapStripes
 struct LockMap {
-  explicit LockMap(size_t num_stripes, std::shared_ptr<MutexFactory> factory) : num_stripes_(num_stripes) {
+  explicit LockMap(size_t num_stripes, const std::shared_ptr<MutexFactory>& factory) : num_stripes_(num_stripes) {
     lock_map_stripes_.reserve(num_stripes);
     for (size_t i = 0; i < num_stripes; i++) {
-      LockMapStripe* stripe = new LockMapStripe(factory);
+      auto stripe = std::make_shared<LockMapStripe>(factory);
       lock_map_stripes_.push_back(stripe);
     }
   }
 
-  ~LockMap() {
-    for (auto stripe : lock_map_stripes_) {
-      delete stripe;
-    }
-  }
+  ~LockMap() = default;
 
   // Number of sepearate LockMapStripes to create, each with their own Mutex
   const size_t num_stripes_;
@@ -62,7 +56,7 @@ struct LockMap {
   // (Only maintained if LockMgr::max_num_locks_ is positive.)
   std::atomic<int64_t> lock_cnt{0};
 
-  std::vector<LockMapStripe*> lock_map_stripes_;
+  std::vector<std::shared_ptr<LockMapStripe>> lock_map_stripes_;
 
   size_t GetStripe(const std::string& key) const;
 };
@@ -73,13 +67,13 @@ size_t LockMap::GetStripe(const std::string& key) const {
   return stripe;
 }
 
-LockMgr::LockMgr(size_t default_num_stripes, int64_t max_num_locks, std::shared_ptr<MutexFactory> mutex_factory)
+LockMgr::LockMgr(size_t default_num_stripes, int64_t max_num_locks, const std::shared_ptr<MutexFactory>& mutex_factory)
     : default_num_stripes_(default_num_stripes),
       max_num_locks_(max_num_locks),
       mutex_factory_(mutex_factory),
-      lock_map_(std::shared_ptr<LockMap>(new LockMap(default_num_stripes, mutex_factory))) {}
+      lock_map_(std::make_shared<LockMap>(default_num_stripes, mutex_factory)) {}
 
-LockMgr::~LockMgr() {}
+LockMgr::~LockMgr() = default;
 
 Status LockMgr::TryLock(const std::string& key) {
 #ifdef LOCKLESS
@@ -87,14 +81,14 @@ Status LockMgr::TryLock(const std::string& key) {
 #else
   size_t stripe_num = lock_map_->GetStripe(key);
   assert(lock_map_->lock_map_stripes_.size() > stripe_num);
-  LockMapStripe* stripe = lock_map_->lock_map_stripes_.at(stripe_num);
+  auto stripe = lock_map_->lock_map_stripes_.at(stripe_num);
 
   return Acquire(stripe, key);
 #endif
 }
 
 // Helper function for TryLock().
-Status LockMgr::Acquire(LockMapStripe* stripe, const std::string& key) {
+Status LockMgr::Acquire(const std::shared_ptr<LockMapStripe>& stripe, const std::string& key) {
   Status result;
 
   // we wait indefinitely to acquire the lock
@@ -125,7 +119,7 @@ Status LockMgr::Acquire(LockMapStripe* stripe, const std::string& key) {
 
 // Try to lock this key after we have acquired the mutex.
 // REQUIRED:  Stripe mutex must be held.
-Status LockMgr::AcquireLocked(LockMapStripe* stripe, const std::string& key) {
+Status LockMgr::AcquireLocked(const std::shared_ptr<LockMapStripe>& stripe, const std::string& key) {
   Status result;
   // Check if this key is already locked
   if (stripe->keys.find(key) != stripe->keys.end()) {
@@ -140,7 +134,7 @@ Status LockMgr::AcquireLocked(LockMapStripe* stripe, const std::string& key) {
       stripe->keys.insert(key);
 
       // Maintain lock count if there is a limit on the number of locks
-      if (max_num_locks_) {
+      if (max_num_locks_ != 0) {
         lock_map_->lock_cnt++;
       }
     }
@@ -149,7 +143,7 @@ Status LockMgr::AcquireLocked(LockMapStripe* stripe, const std::string& key) {
   return result;
 }
 
-void LockMgr::UnLockKey(const std::string& key, LockMapStripe* stripe) {
+void LockMgr::UnLockKey(const std::string& key, const std::shared_ptr<LockMapStripe>& stripe) {
 #ifdef LOCKLESS
 #else
   auto stripe_iter = stripe->keys.find(key);
@@ -171,7 +165,7 @@ void LockMgr::UnLock(const std::string& key) {
   // Lock the mutex for the stripe that this key hashes to
   size_t stripe_num = lock_map_->GetStripe(key);
   assert(lock_map_->lock_map_stripes_.size() > stripe_num);
-  LockMapStripe* stripe = lock_map_->lock_map_stripes_.at(stripe_num);
+  auto stripe = lock_map_->lock_map_stripes_.at(stripe_num);
 
   stripe->stripe_mutex->Lock();
   UnLockKey(key, stripe);
@@ -180,5 +174,4 @@ void LockMgr::UnLock(const std::string& key) {
   // Signal waiting threads to retry locking
   stripe->stripe_cv->NotifyAll();
 }
-}  //  namespace lock
-}  //  namespace pstd
+}  // namespace pstd::lock

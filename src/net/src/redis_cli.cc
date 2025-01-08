@@ -7,36 +7,40 @@
 
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <stdarg.h>
 #include <unistd.h>
+#include <cstdarg>
 
 #include <atomic>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "pstd/include/noncopyable.h"
 #include "net/include/net_cli.h"
 #include "net/include/net_define.h"
+
+using pstd::Status;
 
 namespace net {
 
 class RedisCli : public NetCli {
  public:
   RedisCli();
-  virtual ~RedisCli();
+  ~RedisCli() override;
 
   // msg should have been parsed
-  virtual Status Send(void* msg);
+  Status Send(void* msg) override;
 
   // Read, parse and store the reply
-  virtual Status Recv(void* result = nullptr);
+  Status Recv(void* trival = nullptr) override;
 
  private:
   RedisCmdArgsType argv_;  // The parsed result
 
   char* rbuf_;
-  int32_t rbuf_size_;
-  int32_t rbuf_pos_;
-  int32_t rbuf_offset_;
+  int32_t rbuf_size_{REDIS_IOBUF_LEN};
+  int32_t rbuf_pos_{0};
+  int32_t rbuf_offset_{0};
   int elements_;  // the elements number of this current reply
   int err_;
 
@@ -51,9 +55,6 @@ class RedisCli : public NetCli {
   char* ReadBytes(unsigned int bytes);
   char* ReadLine(int* _len);
 
-  // No copyable
-  RedisCli(const RedisCli&);
-  void operator=(const RedisCli&);
 };
 
 enum REDIS_STATUS {
@@ -72,7 +73,7 @@ enum REDIS_STATUS {
   REDIS_REPLY_ERROR
 };
 
-RedisCli::RedisCli() : rbuf_size_(REDIS_IOBUF_LEN), rbuf_pos_(0), rbuf_offset_(0), err_(REDIS_OK) {
+RedisCli::RedisCli()  {
   rbuf_ = reinterpret_cast<char*>(malloc(sizeof(char) * rbuf_size_));
 }
 
@@ -83,11 +84,11 @@ Status RedisCli::Send(void* msg) {
   Status s;
 
   // TODO(anan) use socket_->SendRaw instead
-  std::string* storage = reinterpret_cast<std::string*>(msg);
+  auto storage = reinterpret_cast<std::string*>(msg);
   const char* wbuf = storage->data();
   size_t nleft = storage->size();
 
-  int wbuf_pos = 0;
+  ssize_t wbuf_pos = 0;
 
   ssize_t nwritten;
   while (nleft > 0) {
@@ -118,7 +119,7 @@ Status RedisCli::Recv(void* trival) {
   int result = GetReply();
   switch (result) {
     case REDIS_OK:
-      if (trival != nullptr) {
+      if (trival) {
         *static_cast<RedisCmdArgsType*>(trival) = argv_;
       }
       return Status::OK();
@@ -163,7 +164,7 @@ ssize_t RedisCli::BufferRead() {
       return REDIS_EREAD_NULL;
     }
 
-    rbuf_offset_ += nread;
+    rbuf_offset_ += static_cast<int32_t>(nread);
     return nread;
   }
 }
@@ -171,14 +172,16 @@ ssize_t RedisCli::BufferRead() {
 /* Find pointer to \r\n. */
 static char* seekNewline(char* s, size_t len) {
   int pos = 0;
-  int _len = len - 1;
+  auto _len = static_cast<int32_t>(len - 1);
 
   /* Position should be < len-1 because the character at "pos" should be
    * followed by a \n. Note that strchr cannot be used because it doesn't
    * allow to search a limited length and the buffer that is being searched
    * might not have a trailing nullptr character. */
   while (pos < _len) {
-    while (pos < _len && s[pos] != '\r') pos++;
+    while (pos < _len && s[pos] != '\r') {
+      pos++;
+    }
     if (s[pos] != '\r' || pos >= _len) {
       /* Not found. */
       return nullptr;
@@ -199,7 +202,8 @@ static char* seekNewline(char* s, size_t len) {
  * terminated by \r\n. Ambiguously returns -1 for unexpected input. */
 static long long readLongLong(char* s) {
   long long v = 0;
-  int dec, mult = 1;
+  int dec;
+  int mult = 1;
   char c;
 
   if (*s == '-') {
@@ -228,7 +232,7 @@ int RedisCli::ProcessLineItem() {
   char* p;
   int len;
 
-  if ((p = ReadLine(&len)) == nullptr) {
+  if (!(p = ReadLine(&len))) {
     return REDIS_HALF;
   }
 
@@ -240,15 +244,16 @@ int RedisCli::ProcessLineItem() {
 }
 
 int RedisCli::ProcessBulkItem() {
-  char *p, *s;
+  char *p;
+  char *s;
   int len;
   int bytelen;
 
   p = rbuf_ + rbuf_pos_;
   s = seekNewline(p, rbuf_offset_);
-  if (s != nullptr) {
-    bytelen = s - p + 2; /* include \r\n */
-    len = readLongLong(p);
+  if (s) {
+    bytelen = static_cast<int32_t>(s - p + 2); /* include \r\n */
+    len = static_cast<int32_t>(readLongLong(p));
 
     if (len == -1) {
       elements_--;
@@ -274,8 +279,8 @@ int RedisCli::ProcessMultiBulkItem() {
   char* p;
   int len;
 
-  if ((p = ReadLine(&len)) != nullptr) {
-    elements_ = readLongLong(p);
+  if (p = ReadLine(&len); p) {
+    elements_ = static_cast<int32_t>(readLongLong(p));
     return REDIS_OK;
   }
 
@@ -289,7 +294,7 @@ int RedisCli::GetReply() {
   while (elements_ > 0) {
     // Should read again
     if (rbuf_offset_ == 0 || result == REDIS_HALF) {
-      if ((result = BufferRead()) < 0) {
+      if ((result = static_cast<int32_t>(BufferRead())) < 0) {
         return result;
       }
     }
@@ -305,25 +310,28 @@ int RedisCli::GetReply() {
 
 char* RedisCli::ReadBytes(unsigned int bytes) {
   char* p = nullptr;
-  if ((unsigned int)rbuf_offset_ >= bytes) {
+  if (static_cast<unsigned int>(rbuf_offset_) >= bytes) {
     p = rbuf_ + rbuf_pos_;
-    rbuf_pos_ += bytes;
-    rbuf_offset_ -= bytes;
+    rbuf_pos_ += static_cast<int32_t>(bytes);
+    rbuf_offset_ -= static_cast<int32_t>(bytes);
   }
   return p;
 }
 
 char* RedisCli::ReadLine(int* _len) {
-  char *p, *s;
+  char *p;
+  char *s;
   int len;
 
   p = rbuf_ + rbuf_pos_;
   s = seekNewline(p, rbuf_offset_);
-  if (s != nullptr) {
-    len = s - (rbuf_ + rbuf_pos_);
+  if (s) {
+    len = static_cast<int32_t>(s - (rbuf_ + rbuf_pos_));
     rbuf_pos_ += len + 2; /* skip \r\n */
     rbuf_offset_ -= len + 2;
-    if (_len) *_len = len;
+    if (_len) {
+      *_len = len;
+    }
     return p;
   }
   return nullptr;
@@ -339,7 +347,7 @@ int RedisCli::GetReplyFromReader() {
   }
 
   char* p;
-  if ((p = ReadBytes(1)) == nullptr) {
+  if (!(p = ReadBytes(1))) {
     return REDIS_HALF;
   }
 
@@ -398,12 +406,12 @@ static int intlen(int i) {
   do {
     len++;
     i /= 10;
-  } while (i);
+  } while (i != 0);
   return len;
 }
 
 // Helper that calculates the bulk length given a certain string length.
-static size_t bulklen(size_t len) { return 1 + intlen(len) + 2 + len + 2; }
+static size_t bulklen(size_t len) { return 1 + intlen(static_cast<int32_t>(len)) + 2 + len + 2; }
 
 int redisvFormatCommand(std::string* cmd, const char* format, va_list ap) {
   const char* c = format;
@@ -416,7 +424,7 @@ int redisvFormatCommand(std::string* cmd, const char* format, va_list ap) {
   while (*c != '\0') {
     if (*c != '%' || c[1] == '\0') {
       if (*c == ' ') {
-        if (touched) {
+        if (touched != 0) {
           args.push_back(curarg);
           totlen += bulklen(curarg.size());
           curarg.clear();
@@ -459,53 +467,67 @@ int redisvFormatCommand(std::string* cmd, const char* format, va_list ap) {
             bool fmt_valid = false;
 
             /* Flags */
-            if (*_p != '\0' && *_p == '#') _p++;
-            if (*_p != '\0' && *_p == '0') _p++;
-            if (*_p != '\0' && *_p == '-') _p++;
-            if (*_p != '\0' && *_p == ' ') _p++;
-            if (*_p != '\0' && *_p == '+') _p++;
+            if (*_p != '\0' && *_p == '#') {
+              _p++;
+            }
+            if (*_p != '\0' && *_p == '0') {
+              _p++;
+            }
+            if (*_p != '\0' && *_p == '-') {
+              _p++;
+            }
+            if (*_p != '\0' && *_p == ' ') {
+              _p++;
+            }
+            if (*_p != '\0' && *_p == '+') {
+              _p++;
+            }
 
             /* Field width */
-            while (*_p != '\0' && isdigit(*_p)) _p++;
+            while (*_p != '\0' && (isdigit(*_p) != 0)) {
+              _p++;
+            }
 
             /* Precision */
             if (*_p == '.') {
               _p++;
-              while (*_p != '\0' && isdigit(*_p)) _p++;
+              while (*_p != '\0' && (isdigit(*_p) != 0)) {
+                _p++;
+              }
             }
 
             /* Copy va_list before consuming with va_arg */
             va_copy(_cpy, ap);
 
-            if (strchr(intfmts, *_p) != nullptr) {
+            if (strchr(intfmts, *_p)) {
               /* Integer conversion (without modifiers) */
               va_arg(ap, int);
               fmt_valid = true;
-            } else if (strchr("eEfFgGaA", *_p) != nullptr) {
+            } else if (strchr("eEfFgGaA", *_p)) {
               /* Double conversion (without modifiers) */
               va_arg(ap, double);
               fmt_valid = true;
             } else if (_p[0] == 'h' && _p[1] == 'h') { /* Size: char */
               _p += 2;
-              if (*_p != '\0' && strchr(intfmts, *_p) != nullptr) {
+              if (*_p != '\0' && strchr(intfmts, *_p)) {
                 va_arg(ap, int); /* char gets promoted to int */
                 fmt_valid = true;
               }
             } else if (_p[0] == 'h') { /* Size: short */
               _p += 1;
-              if (*_p != '\0' && strchr(intfmts, *_p) != nullptr) {
+              if (*_p != '\0' && strchr(intfmts, *_p)) {
                 va_arg(ap, int); /* short gets promoted to int */
                 fmt_valid = true;
               }
             } else if (_p[0] == 'l' && _p[1] == 'l') { /* Size: long long */
               _p += 2;
-              if (*_p != '\0' && strchr(intfmts, *_p) != nullptr) {
+              if (*_p != '\0' && strchr(intfmts, *_p)) {
                 va_arg(ap, long long);
                 fmt_valid = true;
               }
             } else if (_p[0] == 'l') { /* Size: long */
               _p += 1;
-              if (*_p != '\0' && strchr(intfmts, *_p) != nullptr) {
+              if (*_p != '\0' && strchr(intfmts, *_p)) {
                 va_arg(ap, long);
                 fmt_valid = true;
               }
@@ -545,13 +567,13 @@ int redisvFormatCommand(std::string* cmd, const char* format, va_list ap) {
   }
 
   /* Add the last argument if needed */
-  if (touched) {
+  if (touched != 0) {
     args.push_back(curarg);
     totlen += bulklen(curarg.size());
   }
 
   /* Add bytes needed to hold multi bulk count */
-  totlen += 1 + intlen(args.size()) + 2;
+  totlen += 1 + intlen(static_cast<int32_t>(args.size())) + 2;
 
   /* Build the command at protocol level */
   cmd->clear();
@@ -560,16 +582,16 @@ int redisvFormatCommand(std::string* cmd, const char* format, va_list ap) {
   cmd->append(1, '*');
   cmd->append(std::to_string(args.size()));
   cmd->append("\r\n");
-  for (size_t i = 0; i < args.size(); i++) {
+  for (auto & arg : args) {
     cmd->append(1, '$');
-    cmd->append(std::to_string(args[i].size()));
+    cmd->append(std::to_string(arg.size()));
     cmd->append("\r\n");
-    cmd->append(args[i]);
+    cmd->append(arg);
     cmd->append("\r\n");
   }
   assert(cmd->size() == totlen);
 
-  return totlen;
+  return static_cast<int32_t>(totlen);
 }
 
 int redisvAppendCommand(std::string* cmd, const char* format, va_list ap) {
@@ -584,7 +606,7 @@ int redisvAppendCommand(std::string* cmd, const char* format, va_list ap) {
 int redisFormatCommandArgv(RedisCmdArgsType argv, std::string* cmd) {
   size_t argc = argv.size();
 
-  int totlen = 1 + intlen(argc) + 2;
+  size_t totlen = 1 + intlen(static_cast<int32_t>(argc)) + 2;
   for (size_t i = 0; i < argc; i++) {
     totlen += bulklen(argv[i].size());
   }
@@ -614,6 +636,6 @@ int SerializeRedisCommand(std::string* cmd, const char* format, ...) {
   return result;
 }
 
-int SerializeRedisCommand(RedisCmdArgsType argv, std::string* cmd) { return redisFormatCommandArgv(argv, cmd); }
+int SerializeRedisCommand(RedisCmdArgsType argv, std::string* cmd) { return redisFormatCommandArgv(std::move(argv), cmd); }
 
 };  // namespace net

@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "storage/backupable.h"
+#include "storage/storage.h"
 
 namespace storage {
 
@@ -14,44 +15,39 @@ BackupEngine::~BackupEngine() {
   // Wait all children threads
   StopBackup();
   WaitBackupPthread();
-  // Delete engines
-  for (auto& engine : engines_) {
-    delete engine.second;
-  }
-  engines_.clear();
 }
 
-Status BackupEngine::NewCheckpoint(rocksdb::DB* rocksdb_db, const std::string& type) {
+Status BackupEngine::NewCheckpoint(rocksdb::DB* rocksdb_db, int index) {
   rocksdb::DBCheckpoint* checkpoint;
   Status s = rocksdb::DBCheckpoint::Create(rocksdb_db, &checkpoint);
   if (!s.ok()) {
     return s;
   }
-  engines_.insert(std::make_pair(type, checkpoint));
+  engines_.insert(std::make_pair(index, std::unique_ptr<rocksdb::DBCheckpoint>(checkpoint)));
   return s;
 }
 
-Status BackupEngine::Open(storage::Storage* storage, BackupEngine** backup_engine_ptr) {
-  *backup_engine_ptr = new BackupEngine();
-  if (!*backup_engine_ptr) {
+Status BackupEngine::Open(storage::Storage* storage, std::shared_ptr<BackupEngine>& backup_engine_ret, int inst_count) {
+  // BackupEngine() is private, can't use make_shared
+  backup_engine_ret = std::shared_ptr<BackupEngine>(new BackupEngine());
+  if (!backup_engine_ret) {
     return Status::Corruption("New BackupEngine failed!");
   }
 
-  // Create BackupEngine for each db type
+  // Create BackupEngine for each rocksdb instance
   rocksdb::Status s;
   rocksdb::DB* rocksdb_db;
-  std::string types[] = {STRINGS_DB, HASHES_DB, LISTS_DB, ZSETS_DB, SETS_DB};
-  for (const auto& type : types) {
-    if ((rocksdb_db = storage->GetDBByType(type)) == nullptr) {
-      s = Status::Corruption("Error db type");
+  for (int index = 0; index < inst_count; index++) {
+    if (!(rocksdb_db = storage->GetDBByIndex(index))) {
+      s = Status::Corruption("Invalid db index");
     }
 
     if (s.ok()) {
-      s = (*backup_engine_ptr)->NewCheckpoint(rocksdb_db, type);
+      s = backup_engine_ret->NewCheckpoint(rocksdb_db, index);
     }
 
     if (!s.ok()) {
-      delete *backup_engine_ptr;
+      backup_engine_ret = nullptr;
       break;
     }
   }
@@ -73,10 +69,10 @@ Status BackupEngine::SetBackupContent() {
   return s;
 }
 
-Status BackupEngine::CreateNewBackupSpecify(const std::string& backup_dir, const std::string& type) {
-  std::map<std::string, rocksdb::DBCheckpoint*>::iterator it_engine = engines_.find(type);
-  std::map<std::string, BackupContent>::iterator it_content = backup_content_.find(type);
-  std::string dir = GetSaveDirByType(backup_dir, type);
+Status BackupEngine::CreateNewBackupSpecify(const std::string& backup_dir, int index) {
+  auto it_engine = engines_.find(index);
+  auto it_content = backup_content_.find(index);
+  std::string dir = GetSaveDirByIndex(backup_dir, index);
   delete_dir(dir.c_str());
 
   if (it_content != backup_content_.end() && it_engine != engines_.end()) {
@@ -89,15 +85,15 @@ Status BackupEngine::CreateNewBackupSpecify(const std::string& backup_dir, const
     }
 
   } else {
-    return Status::Corruption("invalid db type");
+    return Status::Corruption("Invalid db index");
   }
   return Status::OK();
 }
 
 void* ThreadFuncSaveSpecify(void* arg) {
-  BackupSaveArgs* arg_ptr = static_cast<BackupSaveArgs*>(arg);
-  BackupEngine* p = static_cast<BackupEngine*>(arg_ptr->p_engine);
-  arg_ptr->res = p->CreateNewBackupSpecify(arg_ptr->backup_dir, arg_ptr->key_type);
+  auto arg_ptr = static_cast<BackupSaveArgs*>(arg);
+  auto p = static_cast<BackupEngine*>(arg_ptr->p_engine);
+  arg_ptr->res = p->CreateNewBackupSpecify(arg_ptr->backup_dir, arg_ptr->index_);
   pthread_exit(&(arg_ptr->res));
 }
 
@@ -106,7 +102,7 @@ Status BackupEngine::WaitBackupPthread() {
   Status s = Status::OK();
   for (auto& pthread : backup_pthread_ts_) {
     void* res;
-    if ((ret = pthread_join(pthread.second, &res)) != 0) {
+    if (pthread_join(pthread.second, &res) != 0) {
     }
     Status cur_s = *(static_cast<Status*>(res));
     if (!cur_s.ok()) {
@@ -120,13 +116,15 @@ Status BackupEngine::WaitBackupPthread() {
 
 Status BackupEngine::CreateNewBackup(const std::string& dir) {
   Status s = Status::OK();
-  std::vector<BackupSaveArgs*> args;
+  // ensure cleaning up the pointers after the function has finished.
+  std::vector<std::unique_ptr<BackupSaveArgs>> args;
+  args.reserve(engines_.size());
   for (const auto& engine : engines_) {
     pthread_t tid;
-    BackupSaveArgs* arg = new BackupSaveArgs(reinterpret_cast<void*>(this), dir, engine.first);
-    args.push_back(arg);
-    if (pthread_create(&tid, nullptr, &ThreadFuncSaveSpecify, arg) != 0) {
-      s = Status::Corruption("pthead_create failed.");
+    auto arg = std::make_unique<BackupSaveArgs>(reinterpret_cast<void*>(this), dir, engine.first);
+    args.push_back(std::move(arg));
+    if (pthread_create(&tid, nullptr, &ThreadFuncSaveSpecify, args.back().get()) != 0) {
+      s = Status::Corruption("pthread_create failed.");
       break;
     }
     if (!(backup_pthread_ts_.insert(std::make_pair(engine.first, tid)).second)) {
@@ -140,9 +138,6 @@ Status BackupEngine::CreateNewBackup(const std::string& dir) {
   }
   s = WaitBackupPthread();
 
-  for (auto& a : args) {
-    delete a;
-  }
   return s;
 }
 
@@ -151,3 +146,4 @@ void BackupEngine::StopBackup() {
 }
 
 }  // namespace storage
+

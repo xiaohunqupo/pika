@@ -37,8 +37,8 @@ class NetConn;
  */
 class BackendHandle {
  public:
-  BackendHandle() {}
-  virtual ~BackendHandle() {}
+  BackendHandle() = default;
+  virtual ~BackendHandle() = default;
 
   /*
    *  CronHandle() will be invoked on every cron_interval elapsed.
@@ -103,22 +103,23 @@ class BackendThread : public Thread {
  public:
   BackendThread(ConnFactory* conn_factory, int cron_interval, int keepalive_timeout, BackendHandle* handle,
                 void* private_data);
-  virtual ~BackendThread();
+  ~BackendThread() override;
   /*
    * StartThread will return the error code as pthread_create return
    *  Return 0 if success
    */
-  virtual int StartThread() override;
-  virtual int StopThread() override;
-  pstd::Status Write(const int fd, const std::string& msg);
-  pstd::Status Close(const int fd);
+  int StartThread() override;
+  int StopThread() override;
+  void set_thread_name(const std::string& name) override { Thread::set_thread_name(name); }
+  pstd::Status Write(int fd, const std::string& msg);
+  pstd::Status Close(int fd);
   // Try to connect fd noblock, if return EINPROGRESS or EAGAIN or EWOULDBLOCK
   // put this fd in epoll (SetWaitConnectOnEpoll), process in ProcessConnectStatus
-  pstd::Status Connect(const std::string& dst_ip, const int dst_port, int* fd);
+  pstd::Status Connect(const std::string& dst_ip, int dst_port, int* fd);
   std::shared_ptr<NetConn> GetConn(int fd);
 
  private:
-  virtual void* ThreadMain() override;
+  void* ThreadMain() override;
 
   void InternalDebugPrint();
   // Set connect fd into epoll
@@ -127,19 +128,19 @@ class BackendThread : public Thread {
   void SetWaitConnectOnEpoll(int sockfd);
 
   void AddConnection(const std::string& peer_ip, int peer_port, int sockfd);
-  void CloseFd(std::shared_ptr<NetConn> conn);
-  void CloseFd(const int fd);
-  void CleanUpConnRemaining(const int fd);
+  void CloseFd(const std::shared_ptr<NetConn>& conn);
+  void CloseFd(int fd);
+  void CleanUpConnRemaining(int fd);
   void DoCronTask();
-  void NotifyWrite(const std::string ip_port);
-  void NotifyWrite(const int fd);
-  void NotifyClose(const int fd);
+  void NotifyWrite(std::string& ip_port);
+  void NotifyWrite(int fd);
+  void NotifyClose(int fd);
   void ProcessNotifyEvents(const NetFiredEvent* pfe);
 
   int keepalive_timeout_;
   int cron_interval_;
   BackendHandle* handle_;
-  bool own_handle_;
+  bool own_handle_{false};
   void* private_data_;
 
   /*

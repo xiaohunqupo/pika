@@ -84,14 +84,20 @@ backend_max_pipeline = 20480
 backend_primary_only = false
 
 # Set backend parallel connections per server
-backend_primary_parallel = 1
-backend_replica_parallel = 1
+backend_primary_parallel = 2
+backend_replica_parallel = 2
+# Set quick backend parallel connections per server
+backend_primary_quick = 1
+backend_replica_quick = 1
+
+# Set slot num
+max_slot_num = 1024
 
 # Set backend tcp keepalive period. (0 to disable)
 backend_keepalive_period = "75s"
 
 # Set number of databases of backend.
-backend_number_databases = 16
+backend_number_databases = 1
 
 # If there is no request from client for a long time, the connection will be closed. (0 to disable)
 # Set session recv buffer size & timeout.
@@ -112,6 +118,14 @@ session_keepalive_period = "75s"
 # Set session to be sensitive to failures. Default is false, instead of closing socket, proxy will send an error response to client.
 session_break_on_failure = false
 
+# Slowlog-log-slower-than(us), from receive command to send response, 0 is allways print slow log
+slowlog_log_slower_than = 100000
+
+# quick command list
+quick_cmd_list = "get,set"
+# slow command list
+slow_cmd_list = "mget, mset"
+
 # Set metrics server (such as http://localhost:28000), proxy will report json formatted metrics to specified server in a predefined period.
 metrics_report_server = ""
 metrics_report_period = "1s"
@@ -127,6 +141,9 @@ metrics_report_influxdb_database = ""
 metrics_report_statsd_server = ""
 metrics_report_statsd_period = "1s"
 metrics_report_statsd_prefix = ""
+
+# Maximum delay statistical time interval.(This value must be greater than 0.)
+max_delay_refresh_time_interval = "15s"
 `
 
 type Config struct {
@@ -160,7 +177,10 @@ type Config struct {
 	BackendMaxPipeline     int               `toml:"backend_max_pipeline" json:"backend_max_pipeline"`
 	BackendPrimaryOnly     bool              `toml:"backend_primary_only" json:"backend_primary_only"`
 	BackendPrimaryParallel int               `toml:"backend_primary_parallel" json:"backend_primary_parallel"`
+	BackendPrimaryQuick    int               `toml:"backend_primary_quick" json:"backend_primary_quick"`
+	MaxSlotNum             int               `toml:"max_slot_num" json:"max_slot_num"`
 	BackendReplicaParallel int               `toml:"backend_replica_parallel" json:"backend_replica_parallel"`
+	BackendReplicaQuick    int               `toml:"backend_replica_quick" json:"backend_replica_quick"`
 	BackendKeepAlivePeriod timesize.Duration `toml:"backend_keepalive_period" json:"backend_keepalive_period"`
 	BackendNumberDatabases int32             `toml:"backend_number_databases" json:"backend_number_databases"`
 
@@ -172,6 +192,12 @@ type Config struct {
 	SessionKeepAlivePeriod timesize.Duration `toml:"session_keepalive_period" json:"session_keepalive_period"`
 	SessionBreakOnFailure  bool              `toml:"session_break_on_failure" json:"session_break_on_failure"`
 
+	SlowlogLogSlowerThan int64 `toml:"slowlog_log_slower_than" json:"slowlog_log_slower_than"`
+
+	QuickCmdList    string `toml:"quick_cmd_list" json:"quick_cmd_list"`
+	SlowCmdList     string `toml:"slow_cmd_list" json:"slow_cmd_list"`
+	AutoSetSlowFlag bool   `toml:"auto_set_slow_flag" json:"auto_set_slow_flag"`
+
 	MetricsReportServer           string            `toml:"metrics_report_server" json:"metrics_report_server"`
 	MetricsReportPeriod           timesize.Duration `toml:"metrics_report_period" json:"metrics_report_period"`
 	MetricsReportInfluxdbServer   string            `toml:"metrics_report_influxdb_server" json:"metrics_report_influxdb_server"`
@@ -182,6 +208,10 @@ type Config struct {
 	MetricsReportStatsdServer     string            `toml:"metrics_report_statsd_server" json:"metrics_report_statsd_server"`
 	MetricsReportStatsdPeriod     timesize.Duration `toml:"metrics_report_statsd_period" json:"metrics_report_statsd_period"`
 	MetricsReportStatsdPrefix     string            `toml:"metrics_report_statsd_prefix" json:"metrics_report_statsd_prefix"`
+
+	MaxDelayRefreshTimeInterval timesize.Duration `toml:"max_delay_refresh_time_interval" json:"max_delay_refresh_time_interval"`
+
+	ConfigFileName string `toml:"-" json:"config_file_name"`
 }
 
 func NewDefaultConfig() *Config {
@@ -263,11 +293,20 @@ func (c *Config) Validate() error {
 	if c.BackendMaxPipeline < 0 {
 		return errors.New("invalid backend_max_pipeline")
 	}
+	if c.MaxSlotNum <= 0 {
+		return errors.New("invalid max_slot_num")
+	}
 	if c.BackendPrimaryParallel < 0 {
 		return errors.New("invalid backend_primary_parallel")
 	}
+	if c.BackendPrimaryQuick < 0 || c.BackendPrimaryQuick >= c.BackendPrimaryParallel {
+		return errors.New("invalid backend_primary_quick")
+	}
 	if c.BackendReplicaParallel < 0 {
 		return errors.New("invalid backend_replica_parallel")
+	}
+	if c.BackendReplicaQuick < 0 || c.BackendReplicaQuick >= c.BackendReplicaParallel {
+		return errors.New("invalid backend_replica_quick")
 	}
 	if c.BackendKeepAlivePeriod < 0 {
 		return errors.New("invalid backend_keepalive_period")
@@ -295,6 +334,10 @@ func (c *Config) Validate() error {
 		return errors.New("invalid session_keepalive_period")
 	}
 
+	if c.SlowlogLogSlowerThan < 0 {
+		return errors.New("invalid slowlog_log_slower_than")
+	}
+
 	if c.MetricsReportPeriod < 0 {
 		return errors.New("invalid metrics_report_period")
 	}
@@ -304,5 +347,10 @@ func (c *Config) Validate() error {
 	if c.MetricsReportStatsdPeriod < 0 {
 		return errors.New("invalid metrics_report_statsd_period")
 	}
+
+	if c.MaxDelayRefreshTimeInterval <= 0 {
+		return errors.New("max_delay_refresh_time_interval must be greater than 0")
+	}
+
 	return nil
 }

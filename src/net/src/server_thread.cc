@@ -14,9 +14,10 @@
 
 #include <glog/logging.h>
 
+#include "dispatch_thread.h"
 #include "net/src/server_socket.h"
-#include "pstd/include/xdebug.h"
 #include "pstd/include/testutil.h"
+#include "pstd/include/xdebug.h"
 
 namespace net {
 
@@ -24,36 +25,36 @@ using pstd::Status;
 
 class DefaultServerHandle : public ServerHandle {
  public:
-  virtual void CronHandle() const override {}
-  virtual void FdTimeoutHandle(int fd, const std::string& ip_port) const override {
+  void CronHandle() const override {}
+  void FdTimeoutHandle(int fd, const std::string& ip_port) const override {
     UNUSED(fd);
     UNUSED(ip_port);
   }
-  virtual void FdClosedHandle(int fd, const std::string& ip_port) const override {
+  void FdClosedHandle(int fd, const std::string& ip_port) const override {
     UNUSED(fd);
     UNUSED(ip_port);
   }
-  virtual bool AccessHandle(std::string& ip) const override {
+  bool AccessHandle(std::string& ip) const override {
     UNUSED(ip);
     return true;
   }
-  virtual bool AccessHandle(int fd, std::string& ip) const override {
+  bool AccessHandle(int fd, std::string& ip) const override {
     UNUSED(fd);
     UNUSED(ip);
     return true;
   }
-  virtual int CreateWorkerSpecificData(void** data) const override {
+  int CreateWorkerSpecificData(void** data) const override {
     UNUSED(data);
     return 0;
   }
-  virtual int DeleteWorkerSpecificData(void* data) const override {
+  int DeleteWorkerSpecificData(void* data) const override {
     UNUSED(data);
     return 0;
   }
 };
 
 static const ServerHandle* SanitizeHandle(const ServerHandle* raw_handle) {
-  if (raw_handle == nullptr) {
+  if (!raw_handle) {
     return new DefaultServerHandle();
   }
   return raw_handle;
@@ -106,9 +107,6 @@ ServerThread::~ServerThread() {
     EVP_cleanup();
   }
 #endif
-  for (std::vector<ServerSocket*>::iterator iter = server_sockets_.begin(); iter != server_sockets_.end(); ++iter) {
-    delete *iter;
-  }
   if (own_handle_) {
     delete handle_;
   }
@@ -122,21 +120,24 @@ int ServerThread::SetTcpNoDelay(int connfd) {
 int ServerThread::StartThread() {
   int ret = 0;
   ret = InitHandle();
-  if (ret != kSuccess) return ret;
+  if (ret != kSuccess) {
+    return ret;
+  }
   return Thread::StartThread();
 }
 
 int ServerThread::InitHandle() {
   int ret = 0;
-  ServerSocket* socket_p;
+  std::shared_ptr<ServerSocket> socket_p;
   if (ips_.find("0.0.0.0") != ips_.end()) {
     ips_.clear();
     ips_.insert("0.0.0.0");
   }
-  for (std::set<std::string>::iterator iter = ips_.begin(); iter != ips_.end(); ++iter) {
-    socket_p = new ServerSocket(port_);
-    server_sockets_.push_back(socket_p);
-    ret = socket_p->Listen(*iter);
+
+  for (const auto& ip : ips_) {
+    socket_p = std::make_shared<ServerSocket>(port_);
+    server_sockets_.emplace_back(socket_p);
+    ret = socket_p->Listen(ip);
     if (ret != kSuccess) {
       return ret;
     }
@@ -158,7 +159,8 @@ void* ServerThread::ThreadMain() {
   Status s;
   struct sockaddr_in cliaddr;
   socklen_t clilen = sizeof(struct sockaddr);
-  int fd, connfd;
+  int fd;
+  int connfd;
 
   struct timeval when;
   gettimeofday(&when, nullptr);
@@ -179,7 +181,7 @@ void* ServerThread::ThreadMain() {
     if (cron_interval_ > 0) {
       gettimeofday(&now, nullptr);
       if (when.tv_sec > now.tv_sec || (when.tv_sec == now.tv_sec && when.tv_usec > now.tv_usec)) {
-        timeout = (when.tv_sec - now.tv_sec) * 1000 + (when.tv_usec - now.tv_usec) / 1000;
+        timeout = static_cast<int32_t>((when.tv_sec - now.tv_sec) * 1000 + (when.tv_usec - now.tv_usec) / 1000);
       } else {
         // Do own cron task as well as user's
         DoCronTask();
@@ -196,6 +198,7 @@ void* ServerThread::ThreadMain() {
       pfe = (net_multiplexer_->FiredEvents()) + i;
       fd = pfe->fd;
 
+
       if (pfe->fd == net_multiplexer_->NotifyReceiveFd()) {
         ProcessNotifyEvents(pfe);
         continue;
@@ -205,8 +208,8 @@ void* ServerThread::ThreadMain() {
        * Handle server event
        */
       if (server_fds_.find(fd) != server_fds_.end()) {
-        if (pfe->mask & kReadable) {
-          connfd = accept(fd, (struct sockaddr*)&cliaddr, &clilen);
+        if ((pfe->mask & kReadable) != 0) {
+          connfd = accept(fd, reinterpret_cast<struct sockaddr*>(&cliaddr), &clilen);
           if (connfd == -1) {
             LOG(WARNING) << "accept error, errno numberis " << errno << ", error reason " << strerror(errno);
             continue;
@@ -238,7 +241,7 @@ void* ServerThread::ThreadMain() {
            */
           HandleNewConn(connfd, ip_port);
 
-        } else if (pfe->mask & kErrorEvent) {
+        } else if ((pfe->mask & kErrorEvent) != 0) {
           /*
            * this branch means there is error on the listen fd
            */
@@ -255,13 +258,14 @@ void* ServerThread::ThreadMain() {
     }
   }
 
-  for (auto iter = server_sockets_.begin(); iter != server_sockets_.end(); iter++) {
-    delete *iter;
-  }
   server_sockets_.clear();
   server_fds_.clear();
 
   return nullptr;
+}
+
+void ServerThread::SetLogNetActivities(bool value) {
+  log_net_activities_.store(value, std::memory_order::memory_order_relaxed);
 }
 
 #ifdef __ENABLE_SSL
@@ -312,7 +316,7 @@ int ServerThread::EnableSecurity(const std::string& cert_file, const std::string
   }
 
   if (SSL_CTX_use_PrivateKey_file(ssl_ctx_, key_file.c_str(), SSL_FILETYPE_PEM) != 1) {
-    LOG(WARNING) << "SSL_CTX_use_PrivateKey_file(" <<  key_file << ")";
+    LOG(WARNING) << "SSL_CTX_use_PrivateKey_file(" << key_file << ")";
     return -1;
   }
 

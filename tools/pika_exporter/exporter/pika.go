@@ -8,11 +8,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/OpenAtomFoundation/pika/tools/pika_exporter/discovery"
-
-	"github.com/OpenAtomFoundation/pika/tools/pika_exporter/exporter/metrics"
 	"github.com/prometheus/client_golang/prometheus"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/OpenAtomFoundation/pika/tools/pika_exporter/discovery"
+	"github.com/OpenAtomFoundation/pika/tools/pika_exporter/exporter/metrics"
 )
 
 type dbKeyPair struct {
@@ -55,6 +55,7 @@ func NewPikaExporter(dis discovery.Discovery, namespace string,
 	}
 	e.scanCount = scanCount
 
+	e.registerMetrics()
 	e.initMetrics()
 	e.wg.Add(1)
 	go e.statsKeySpace(statsClockHour)
@@ -215,7 +216,12 @@ func (e *exporter) scrape(ch chan<- prometheus.Metric) {
 }
 
 func (e *exporter) collectInfo(c *client, ch chan<- prometheus.Metric) error {
-	info, err := c.Info()
+	// update info config
+	if err := LoadConfig(); err != nil {
+		log.Errorln("load config failed:", err)
+		return err
+	}
+	info, err := c.GetInfo()
 	if err != nil {
 		return err
 	}
@@ -234,7 +240,6 @@ func (e *exporter) collectInfo(c *client, ch chan<- prometheus.Metric) error {
 	if err != nil {
 		return err
 	}
-
 	collector := metrics.CollectFunc(func(m metrics.Metric) error {
 		promMetric, err := prometheus.NewConstMetric(
 			prometheus.NewDesc(prometheus.BuildFQName(e.namespace, "", m.Name), m.Help, m.Labels, nil),
@@ -247,9 +252,10 @@ func (e *exporter) collectInfo(c *client, ch chan<- prometheus.Metric) error {
 		return nil
 	})
 	parseOpt := metrics.ParseOption{
-		Version:  version,
-		Extracts: extracts,
-		Info:     info,
+		Version:        version,
+		Extracts:       extracts,
+		Info:           info,
+		CurrentVersion: selectversion(version.Original()),
 	}
 	for _, m := range metrics.MetricConfigs {
 		m.Parse(m, collector, parseOpt)
@@ -258,6 +264,37 @@ func (e *exporter) collectInfo(c *client, ch chan<- prometheus.Metric) error {
 	return nil
 }
 
+const (
+	VERSION_336 = "3.3.6"
+	VERSION_350 = "3.5.0"
+	VERSION_355 = "3.5.5"
+)
+
+func selectversion(version string) metrics.VersionChecker {
+	if !isValidVersion(version) {
+		log.Warnf("Invalid version format: %s", version)
+		return nil
+	}
+	var v metrics.VersionChecker
+	switch version {
+	case VERSION_336:
+		v = &metrics.VersionChecker336{}
+	case VERSION_355:
+		v = &metrics.VersionChecker355{}
+	case VERSION_350:
+		v = &metrics.VersionChecker350{}
+	default:
+		return nil
+	}
+	v.InitVersionChecker()
+	return v
+}
+
+// isValidVersion validates the version string format (e.g., x.y.z)
+func isValidVersion(version string) bool {
+	matched, _ := regexp.MatchString(`^\d+\.\d+\.\d+$`, version)
+	return matched
+}
 func (e *exporter) collectKeys(c *client) error {
 	allKeys := append([]dbKeyPair{}, e.keys...)
 	keys, err := getKeysFromPatterns(c, e.keyPatterns, e.scanCount)
@@ -289,6 +326,44 @@ func (e *exporter) collectKeys(c *client) error {
 	return nil
 }
 
+func (e *exporter) registerMetrics() {
+	config := InfoConf
+	if config.Server {
+		metrics.RegisterServer()
+	}
+	if config.Data {
+		metrics.RegisterData()
+	}
+	if config.Clients {
+		metrics.RegisterClients()
+	}
+	if config.Stats {
+		metrics.RegisterStats()
+	}
+	if config.CPU {
+		metrics.RegisterCPU()
+	}
+	if config.Replication {
+		metrics.RegisterReplication()
+	}
+	if config.Keyspace {
+		metrics.RegisterKeyspace()
+	}
+	if config.Execcount {
+		metrics.RegisterCommandExecCount()
+	}
+	if config.Commandstats {
+		metrics.RegisterCommandstats()
+	}
+	if config.Rocksdb {
+		metrics.RegisterRocksDB()
+	}
+	if config.Cache {
+		metrics.RegisterCache()
+	}
+	metrics.RegisterBinlog()
+}
+
 func getKeysFromPatterns(c *client, keyPatterns []dbKeyPair, scanCount int) ([]dbKeyPair, error) {
 	var expandedKeys []dbKeyPair
 	for _, kp := range keyPatterns {
@@ -315,7 +390,6 @@ func (e *exporter) statsKeySpace(hour int) {
 	defer e.wg.Done()
 
 	if hour < 0 {
-		log.Infoln("stats KeySpace not open")
 		return
 	}
 

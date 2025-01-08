@@ -8,19 +8,10 @@
 #include <glog/logging.h>
 
 PikaClientProcessor::PikaClientProcessor(size_t worker_num, size_t max_queue_size, const std::string& name_prefix) {
-  pool_ = new net::ThreadPool(worker_num, max_queue_size, name_prefix + "Pool");
-  for (size_t i = 0; i < worker_num; ++i) {
-    net::BGThread* bg_thread = new net::BGThread(max_queue_size);
-    bg_threads_.push_back(bg_thread);
-    bg_thread->set_thread_name(name_prefix + "BgThread");
-  }
+  pool_ = std::make_unique<net::ThreadPool>(worker_num, max_queue_size, name_prefix + "Pool");
 }
 
 PikaClientProcessor::~PikaClientProcessor() {
-  delete pool_;
-  for (size_t i = 0; i < bg_threads_.size(); ++i) {
-    delete bg_threads_[i];
-  }
   LOG(INFO) << "PikaClientProcessor exit!!!";
 }
 
@@ -29,33 +20,27 @@ int PikaClientProcessor::Start() {
   if (res != net::kSuccess) {
     return res;
   }
-  for (size_t i = 0; i < bg_threads_.size(); ++i) {
-    res = bg_threads_[i]->StartThread();
-    if (res != net::kSuccess) {
-      return res;
-    }
-  }
   return res;
 }
 
 void PikaClientProcessor::Stop() {
   pool_->stop_thread_pool();
-  for (size_t i = 0; i < bg_threads_.size(); ++i) {
-    bg_threads_[i]->StopThread();
-  }
 }
 
 void PikaClientProcessor::SchedulePool(net::TaskFunc func, void* arg) { pool_->Schedule(func, arg); }
-
-void PikaClientProcessor::ScheduleBgThreads(net::TaskFunc func, void* arg, const std::string& hash_str) {
-  std::size_t index = std::hash<std::string>{}(hash_str) % bg_threads_.size();
-  bg_threads_[index]->Schedule(func, arg);
-}
 
 size_t PikaClientProcessor::ThreadPoolCurQueueSize() {
   size_t cur_size = 0;
   if (pool_) {
     pool_->cur_queue_size(&cur_size);
+  }
+  return cur_size;
+}
+
+size_t PikaClientProcessor::ThreadPoolMaxQueueSize() {
+  size_t cur_size = 0;
+  if (pool_) {
+    cur_size = pool_->max_queue_size();
   }
   return cur_size;
 }

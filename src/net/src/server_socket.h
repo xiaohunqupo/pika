@@ -12,9 +12,11 @@
 #include <iostream>
 #include <string>
 
+#include "pstd/include/noncopyable.h"
+
 namespace net {
 
-class ServerSocket {
+class ServerSocket : public pstd::noncopyable {
  public:
   explicit ServerSocket(int port, bool is_block = false);
 
@@ -56,25 +58,19 @@ class ServerSocket {
    */
   int port_;
   int flags_;
-  int send_timeout_;
-  int recv_timeout_;
-  int accept_timeout_;
-  int accept_backlog_;
-  int tcp_send_buffer_;
-  int tcp_recv_buffer_;
-  bool keep_alive_;
-  bool listening_;
+  int send_timeout_{0};
+  int recv_timeout_{0};
+  int accept_timeout_{0};
+  int accept_backlog_{1024};
+  int tcp_send_buffer_{0};
+  int tcp_recv_buffer_{0};
+  bool keep_alive_{false};
+  bool listening_{false};
   bool is_block_;
 
   struct sockaddr_in servaddr_;
   int sockfd_;
 
-  /*
-   * No allowed copy and copy assign operator
-   */
-
-  ServerSocket(const ServerSocket&);
-  void operator=(const ServerSocket&);
 };
 
 }  // namespace net

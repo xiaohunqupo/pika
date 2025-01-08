@@ -16,13 +16,12 @@ BinlogConsumer::BinlogConsumer(const std::string& binlog_path, uint32_t first_fi
 
 BinlogConsumer::~BinlogConsumer() {
   delete[] backing_store_;
-  delete queue_;
 }
 
 std::string BinlogConsumer::NewFileName(const std::string& name, const uint32_t current) {
   char buf[256];
   snprintf(buf, sizeof(buf), "%s%u", name.c_str(), current);
-  return std::string(buf);
+  return {buf};
 }
 
 bool BinlogConsumer::Init() {
@@ -37,12 +36,8 @@ bool BinlogConsumer::Init() {
 
   current_filenum_ = first_filenum_;
   profile = NewFileName(filename_, current_filenum_);
-  pstd::Status s = pstd::NewSequentialFile(profile, &queue_);
-  if (!s.ok()) {
-    return false;
-  } else {
-    return true;
-  }
+  pstd::Status s = pstd::NewSequentialFile(profile, queue_);
+  return s.ok();
 }
 
 bool BinlogConsumer::trim() {
@@ -64,7 +59,7 @@ bool BinlogConsumer::trim() {
       break;
     }
     offset = get_next(&is_error);
-    if (is_error == true) {
+    if (is_error) {
       return false;
     }
     res += offset;
@@ -212,10 +207,10 @@ pstd::Status BinlogConsumer::Parse(std::string* scratch) {
         // Roll to next File
         if (pstd::FileExists(confile)) {
           // DLOG(INFO) << "BinlogSender roll to new binlog" << confile;
-          delete queue_;
+          queue_.reset();
           queue_ = nullptr;
 
-          pstd::NewSequentialFile(confile, &queue_);
+          pstd::NewSequentialFile(confile, queue_);
 
           current_filenum_++;
           current_offset_ = 0;

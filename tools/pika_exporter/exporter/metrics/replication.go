@@ -2,7 +2,7 @@ package metrics
 
 import "regexp"
 
-func init() {
+func RegisterReplication() {
 	Register(collectReplicationMetrics)
 }
 
@@ -99,9 +99,9 @@ var collectReplicationMetrics = map[string]MetricConfig{
 		MetricMeta: &MetaDatas{
 			{
 				Name:      "slave_lag",
-				Help:      "pika serve instance slave's partition binlog lag",
+				Help:      "pika serve instance slave's slot binlog lag",
 				Type:      metricTypeGauge,
-				Labels:    []string{LabelNameAddr, LabelNameAlias, "slave_conn_fd", "slave_ip", "slave_port", "partition"},
+				Labels:    []string{LabelNameAddr, LabelNameAlias, "slave_ip", "slave_port", "slave_conn_fd", "db"},
 				ValueName: "slave_lag",
 			},
 		},
@@ -115,7 +115,7 @@ var collectReplicationMetrics = map[string]MetricConfig{
 			},
 			Parser: Parsers{
 				&versionMatchParser{
-					verC: mustNewVersionConstraint(`>=3.4.0`),
+					verC: mustNewVersionConstraint(`>=3.4.0,<3.1.0`),
 					Parser: &regexParser{
 						name: "master_sharding_slave_info_slave_lag",
 						reg: regexp.MustCompile(`slave\d+:ip=(?P<slave_ip>[\d.]+),port=(?P<slave_port>[\d.]+),` +
@@ -123,20 +123,20 @@ var collectReplicationMetrics = map[string]MetricConfig{
 						Parser: &regexParser{
 							name:   "master_sharding_slave_info_slave_lag",
 							source: "slave_lag",
-							reg:    regexp.MustCompile(`((?P<partition>db[\d.]+:[\d.]+).*:(?P<slave_lag>[\d]+))`),
+							reg:    regexp.MustCompile(`((?P<slot>db[\d.]+:[\d.]+).*:(?P<slave_lag>[\d]+))`),
 							Parser: &normalParser{},
 						},
 					},
 				},
 				&versionMatchParser{
-					verC: mustNewVersionConstraint(`>=3.4.0`),
+					verC: mustNewVersionConstraint(`>=3.4.0,<3.5.0`),
 					Parser: &regexParser{
 						name: "master_sharding_slave_info_slave_lag",
 						reg:  regexp.MustCompile(`db_repl_state:(?P<slave_lag>[^\r\n]*)`),
 						Parser: &regexParser{
 							name:   "master_sharding_slave_info_slave_lag",
 							source: "slave_lag",
-							reg:    regexp.MustCompile(`((?P<partition>db[\d.]+:[\d.]+).*:(?P<slave_lag>[\d]+))`),
+							reg:    regexp.MustCompile(`((?P<slot>db[\d.]+:[\d.]+).*:(?P<slave_lag>[\d]+))`),
 							Parser: &normalParser{},
 						},
 					},
@@ -145,11 +145,11 @@ var collectReplicationMetrics = map[string]MetricConfig{
 		},
 		MetricMeta: &MetaDatas{
 			{
-				Name:      "partition_slave_lag",
-				Help:      "pika serve instance slave's partition binlog lag",
+				Name:      "slot_slave_lag",
+				Help:      "pika serve instance slave's slot binlog lag",
 				Type:      metricTypeGauge,
-				Labels:    []string{LabelNameAddr, LabelNameAlias, "slave_conn_fd", "slave_ip", "slave_port", "partition"},
-				ValueName: "partition_slave_lag",
+				Labels:    []string{LabelNameAddr, LabelNameAlias, "slave_conn_fd", "slave_ip", "slave_port", "slot"},
+				ValueName: "slot_slave_lag",
 			},
 		},
 	},
@@ -174,6 +174,37 @@ var collectReplicationMetrics = map[string]MetricConfig{
 			},
 		},
 	},
+
+    "slave_info>=3.5.5_or_4.0.0": {
+        Parser: &keyMatchParser{
+            matchers: map[string]Matcher{
+                "role": &equalMatcher{v: "slave"},
+            },
+            Parser: &regexParser{
+                name: "repl_connect_status",
+                reg:  regexp.MustCompile(`(?m)^\s*(?P<db_name>db\d+)\s*:\s*(?P<status>\w+)\s*$`),
+                Parser: &statusToGaugeParser{
+                    statusMapping: map[string]int{
+                        "no_connect":          0,
+                        "try_to_incr_sync":    1,
+                        "try_to_full_sync":    2,
+                        "syncing_full":        3,
+                        "connecting":          4,
+                        "connected":           5,
+                        "error":               -1,
+                    },
+                },
+            },
+        },
+        MetricMeta: &MetaData{
+            Name:      "repl_connect_status",
+            Help:      "Replication connection status for each database on the slave node",
+            Type:      metricTypeGauge,
+            Labels:    []string{LabelNameAddr, LabelNameAlias, "db_name"},
+            ValueName: "status",
+        },
+    },
+
 
 	"slave_info<3.2.0": {
 		Parser: &keyMatchParser{
@@ -222,27 +253,27 @@ var collectReplicationMetrics = map[string]MetricConfig{
 		},
 	},
 
-	"sharding_slave_info>=3.4.0": {
+	"sharding_slave_info>=3.4.x,<3.5.0": {
 		Parser: &keyMatchParser{
 			matchers: map[string]Matcher{
 				"role":          &equalMatcher{v: "slave"},
 				"instance-mode": &equalMatcher{v: "sharding"},
 			},
 			Parser: &versionMatchParser{
-				verC:   mustNewVersionConstraint(`>=3.4.0`),
+				verC:   mustNewVersionConstraint(`>=3.4.x,<3.5.0`),
 				Parser: &normalParser{},
 			},
 		},
 		MetricMeta: &MetaData{
-			Name:      "partition_repl_state",
-			Help:      "sync connection state between slave and master for each partition, when pika instance's role is slave",
+			Name:      "slot_repl_state",
+			Help:      "sync connection state between slave and master for each slot, when pika instance's role is slave",
 			Type:      metricTypeGauge,
 			Labels:    []string{LabelNameAddr, LabelNameAlias, "master_host", "master_port"},
-			ValueName: "partition_repl_state",
+			ValueName: "slot_repl_state",
 		},
 	},
 
-	"double_master_info": {
+	"double_master_info<=3.4.2": {
 		Parser: &keyMatchParser{
 			matchers: map[string]Matcher{
 				"role":               &equalMatcher{v: "master"},

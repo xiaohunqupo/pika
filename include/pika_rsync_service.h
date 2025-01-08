@@ -6,11 +6,11 @@
 #ifndef PIKA_RSYNC_SERVICE_H_
 #define PIKA_RSYNC_SERVICE_H_
 
-#include "iostream"
+#include <iostream>
 
 class PikaRsyncService {
  public:
-  PikaRsyncService(const std::string& raw_path, const int port);
+  PikaRsyncService(const std::string& raw_path, int port);
   ~PikaRsyncService();
   int StartRsync();
   bool CheckRsyncAlive();

@@ -13,19 +13,15 @@
 class PikaReplServerThread : public net::HolyThread {
  public:
   PikaReplServerThread(const std::set<std::string>& ips, int port, int cron_interval);
-  virtual ~PikaReplServerThread() = default;
-
+  ~PikaReplServerThread() override = default;
   int ListenPort();
-
-  // for ProcessBinlogData use
-  uint64_t GetnPlusSerial() { return serial_++; }
 
  private:
   class ReplServerConnFactory : public net::ConnFactory {
    public:
     explicit ReplServerConnFactory(PikaReplServerThread* binlog_receiver) : binlog_receiver_(binlog_receiver) {}
 
-    virtual std::shared_ptr<net::NetConn> NewNetConn(int connfd, const std::string& ip_port, net::Thread* thread,
+    std::shared_ptr<net::NetConn> NewNetConn(int connfd, const std::string& ip_port, net::Thread* thread,
                                                      void* worker_specific_data,
                                                      net::NetMultiplexer* net) const override {
       return std::static_pointer_cast<net::NetConn>(
@@ -38,7 +34,7 @@ class PikaReplServerThread : public net::HolyThread {
 
   class ReplServerHandle : public net::ServerHandle {
    public:
-    virtual void FdClosedHandle(int fd, const std::string& ip_port) const override;
+    void FdClosedHandle(int fd, const std::string& ip_port) const override;
   };
 
   ReplServerConnFactory conn_factory_;

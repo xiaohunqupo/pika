@@ -33,50 +33,49 @@
  */
 #include "pstd/include/pstd_string.h"
 
-#include <arpa/inet.h>
-#include <ctype.h>
-#include <dirent.h>
-#include <errno.h>
-#include <float.h>
-#include <limits.h>
-#include <math.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
 #include <sys/time.h>
-#include <sys/types.h>
 #include <unistd.h>
+#include <cctype>
+#include <cfloat>
+#include <climits>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <sstream>
 
 #include <algorithm>
 
-#include "pstd/include/fmacros.h"
+#include "pstd/include/pstd_defer.h"
 
 namespace pstd {
 
 /* Glob-style pattern matching. */
 int stringmatchlen(const char* pattern, int patternLen, const char* string, int stringLen, int nocase) {
-  while (patternLen) {
+  while (patternLen != 0) {
     switch (pattern[0]) {
       case '*':
         while (pattern[1] == '*') {
           pattern++;
           patternLen--;
         }
-        if (patternLen == 1) return 1; /* match */
-        while (stringLen) {
-          if (stringmatchlen(pattern + 1, patternLen - 1, string, stringLen, nocase)) return 1; /* match */
+        if (patternLen == 1) {
+          return 1; /* match */
+        }
+        while (stringLen != 0) {
+          if (stringmatchlen(pattern + 1, patternLen - 1, string, stringLen, nocase) != 0) {
+            return 1; /* match */
+          }
           string++;
           stringLen--;
         }
         return 0; /* no match */
         break;
       case '?':
-        if (stringLen == 0) return 0; /* no match */
+        if (stringLen == 0) {
+          return 0; /* no match */
+        }
         string++;
         stringLen--;
         break;
@@ -86,17 +85,19 @@ int stringmatchlen(const char* pattern, int patternLen, const char* string, int 
 
         pattern++;
         patternLen--;
-        nott = pattern[0] == '^';
-        if (nott) {
+        nott = static_cast<int>(pattern[0] == '^');
+        if (nott != 0) {
           pattern++;
           patternLen--;
         }
         match = 0;
-        while (1) {
+        while (true) {
           if (pattern[0] == '\\') {
             pattern++;
             patternLen--;
-            if (pattern[0] == string[0]) match = 1;
+            if (pattern[0] == string[0]) {
+              match = 1;
+            }
           } else if (pattern[0] == ']') {
             break;
           } else if (patternLen == 0) {
@@ -112,26 +113,36 @@ int stringmatchlen(const char* pattern, int patternLen, const char* string, int 
               start = end;
               end = t;
             }
-            if (nocase) {
+            if (nocase != 0) {
               start = tolower(start);
               end = tolower(end);
               c = tolower(c);
             }
             pattern += 2;
             patternLen -= 2;
-            if (c >= start && c <= end) match = 1;
+            if (c >= start && c <= end) {
+              match = 1;
+            }
           } else {
-            if (!nocase) {
-              if (pattern[0] == string[0]) match = 1;
+            if (nocase == 0) {
+              if (pattern[0] == string[0]) {
+                match = 1;
+              }
             } else {
-              if (tolower((int)pattern[0]) == tolower((int)string[0])) match = 1;
+              if (tolower(static_cast<int>(pattern[0])) == tolower(static_cast<int>(string[0]))) {
+                match = 1;
+              }
             }
           }
           pattern++;
           patternLen--;
         }
-        if (nott) match = !match;
-        if (!match) return 0; /* no match */
+        if (nott != 0) {
+          match = static_cast<int>(match == 0);
+        }
+        if (match == 0) {
+          return 0; /* no match */
+        }
         string++;
         stringLen--;
         break;
@@ -143,10 +154,14 @@ int stringmatchlen(const char* pattern, int patternLen, const char* string, int 
         }
         /* fall through */
       default:
-        if (!nocase) {
-          if (pattern[0] != string[0]) return 0; /* no match */
+        if (nocase == 0) {
+          if (pattern[0] != string[0]) {
+            return 0; /* no match */
+          }
         } else {
-          if (tolower((int)pattern[0]) != tolower((int)string[0])) return 0; /* no match */
+          if (tolower(static_cast<int>(pattern[0])) != tolower(static_cast<int>(string[0]))) {
+            return 0; /* no match */
+          }
         }
         string++;
         stringLen--;
@@ -162,12 +177,15 @@ int stringmatchlen(const char* pattern, int patternLen, const char* string, int 
       break;
     }
   }
-  if (patternLen == 0 && stringLen == 0) return 1;
+  if (patternLen == 0 && stringLen == 0) {
+    return 1;
+  }
   return 0;
 }
 
 int stringmatch(const char* pattern, const char* string, int nocase) {
-  return stringmatchlen(pattern, strlen(pattern), string, strlen(string), nocase);
+  return stringmatchlen(pattern, static_cast<int32_t>(strlen(pattern)),
+				        string, static_cast<int32_t>(strlen(string)), nocase);
 }
 
 /* Convert a string representing an amount of memory into the number of
@@ -183,32 +201,42 @@ long long memtoll(const char* p, int* err) {
   long long val;
   unsigned int digits;
 
-  if (err) *err = 0;
+  if (err) {
+    *err = 0;
+  }
   /* Search the first non digit character. */
   u = p;
-  if (*u == '-') u++;
-  while (*u && isdigit(*u)) u++;
-  if (*u == '\0' || !strcasecmp(u, "b")) {
+  if (*u == '-') {
+    u++;
+  }
+  while ((*u != 0) && (isdigit(*u) != 0)) {
+    u++;
+  }
+  if (*u == '\0' || (strcasecmp(u, "b") == 0)) {
     mul = 1;
-  } else if (!strcasecmp(u, "k")) {
+  } else if (strcasecmp(u, "k") == 0) {
     mul = 1000;
-  } else if (!strcasecmp(u, "kb")) {
+  } else if (strcasecmp(u, "kb") == 0) {
     mul = 1024;
-  } else if (!strcasecmp(u, "m")) {
+  } else if (strcasecmp(u, "m") == 0) {
     mul = 1000 * 1000;
-  } else if (!strcasecmp(u, "mb")) {
+  } else if (strcasecmp(u, "mb") == 0) {
     mul = 1024 * 1024;
-  } else if (!strcasecmp(u, "g")) {
+  } else if (strcasecmp(u, "g") == 0) {
     mul = 1000L * 1000 * 1000;
-  } else if (!strcasecmp(u, "gb")) {
+  } else if (strcasecmp(u, "gb") == 0) {
     mul = 1024L * 1024 * 1024;
   } else {
-    if (err) *err = 1;
+    if (err) {
+      *err = 1;
+    }
     mul = 1;
   }
   digits = u - p;
   if (digits >= sizeof(buf)) {
-    if (err) *err = 1;
+    if (err) {
+      *err = 1;
+    }
     return LLONG_MAX;
   }
   memcpy(buf, p, digits);
@@ -220,21 +248,29 @@ long long memtoll(const char* p, int* err) {
 /* Return the number of digits of 'v' when converted to string in radix 10.
  * See ll2string() for more information. */
 uint32_t digits10(uint64_t v) {
-  if (v < 10) return 1;
-  if (v < 100) return 2;
-  if (v < 1000) return 3;
+  if (v < 10) {
+    return 1;
+  }
+  if (v < 100) {
+    return 2;
+  }
+  if (v < 1000) {
+    return 3;
+  }
   if (v < 1000000000000UL) {
     if (v < 100000000UL) {
       if (v < 1000000) {
-        if (v < 10000) return 4;
-        return 5 + (v >= 100000);
+        if (v < 10000) {
+          return 4;
+        }
+        return 5 + static_cast<int>(v >= 100000);
       }
-      return 7 + (v >= 10000000UL);
+      return 7 + static_cast<int>(v >= 10000000UL);
     }
     if (v < 10000000000UL) {
-      return 9 + (v >= 1000000000UL);
+      return 9 + static_cast<int>(v >= 1000000000UL);
     }
-    return 11 + (v >= 100000000000UL);
+    return 11 + static_cast<int>(v >= 100000000000UL);
   }
   return 12 + digits10(v / 1000000000000UL);
 }
@@ -266,7 +302,7 @@ int ll2string(char* dst, size_t dstlen, long long svalue) {
     if (svalue != LLONG_MIN) {
       value = -svalue;
     } else {
-      value = ((unsigned long long)LLONG_MAX) + 1;
+      value = (static_cast<unsigned long long>(LLONG_MAX) + 1);
     }
     negative = 1;
   } else {
@@ -276,14 +312,16 @@ int ll2string(char* dst, size_t dstlen, long long svalue) {
 
   /* Check length. */
   uint32_t const length = digits10(value) + negative;
-  if (length >= dstlen) return 0;
+  if (length >= dstlen) {
+    return 0;
+  }
 
   /* Null term. */
   uint32_t next = length;
   dst[next] = '\0';
   next--;
   while (value >= 100) {
-    int const i = (value % 100) * 2;
+    int const i = static_cast<int32_t>((value % 100) * 2);
     value /= 100;
     dst[next] = digits[i + 1];
     dst[next - 1] = digits[i];
@@ -292,16 +330,18 @@ int ll2string(char* dst, size_t dstlen, long long svalue) {
 
   /* Handle last 1-2 digits. */
   if (value < 10) {
-    dst[next] = '0' + (uint32_t)value;
+    dst[next] = static_cast<char>('0' + value);
   } else {
-    int i = (uint32_t)value * 2;
+    auto i = static_cast<uint32_t>(value) * 2;
     dst[next] = digits[i + 1];
     dst[next - 1] = digits[i];
   }
 
   /* Add sign. */
-  if (negative) dst[0] = '-';
-  return length;
+  if (negative != 0) {
+    dst[0] = '-';
+  }
+  return static_cast<int32_t>(length);
 }
 
 /* Convert a string into a long long. Returns 1 if the string could be parsed
@@ -313,11 +353,15 @@ int string2int(const char* s, size_t slen, long long* value) {
   int negative = 0;
   unsigned long long v;
 
-  if (plen == slen) return 0;
+  if (plen == slen) {
+    return 0;
+  }
 
   /* Special case: first and only digit is 0. */
   if (slen == 1 && p[0] == '0') {
-    if (value != nullptr) *value = 0;
+    if (value) {
+      *value = 0;
+    }
     return 1;
   }
 
@@ -327,7 +371,9 @@ int string2int(const char* s, size_t slen, long long* value) {
     plen++;
 
     /* Abort on only a negative sign. */
-    if (plen == slen) return 0;
+    if (plen == slen) {
+      return 0;
+    }
   }
 
   while (plen < slen && p[0] == '0') {
@@ -336,7 +382,9 @@ int string2int(const char* s, size_t slen, long long* value) {
   }
 
   if (plen == slen) {
-    if (value != nullptr) *value = 0;
+    if (value) {
+      *value = 0;
+    }
     return 1;
   }
 
@@ -353,12 +401,14 @@ int string2int(const char* s, size_t slen, long long* value) {
   }
 
   while (plen < slen && p[0] >= '0' && p[0] <= '9') {
-    if (v > (ULLONG_MAX / 10)) /* Overflow. */
+    if (v > (ULLONG_MAX / 10)) { /* Overflow. */
       return 0;
+    }
     v *= 10;
 
-    if (v > (ULLONG_MAX - (p[0] - '0'))) /* Overflow. */
+    if (v > (ULLONG_MAX - (p[0] - '0'))) { /* Overflow. */
       return 0;
+    }
     v += p[0] - '0';
 
     p++;
@@ -366,16 +416,24 @@ int string2int(const char* s, size_t slen, long long* value) {
   }
 
   /* Return if not all bytes were used. */
-  if (plen < slen) return 0;
+  if (plen < slen) {
+    return 0;
+  }
 
-  if (negative) {
-    if (v > ((unsigned long long)(-(LLONG_MIN + 1)) + 1)) /* Overflow. */
+  if (negative != 0) {
+    if (v > (static_cast<unsigned long long>(-(LLONG_MIN + 1)) + 1)) { /* Overflow. */
       return 0;
-    if (value != nullptr) *value = -v;
+    }
+    if (value) {
+      *value = static_cast<long long>(-v);
+    }
   } else {
-    if (v > LLONG_MAX) /* Overflow. */
+    if (v > LLONG_MAX) { /* Overflow. */
       return 0;
-    if (value != nullptr) *value = v;
+    }
+    if (value) {
+      *value = static_cast<long long>(v);
+    }
   }
   return 1;
 }
@@ -386,11 +444,15 @@ int string2int(const char* s, size_t slen, long long* value) {
 int string2int(const char* s, size_t slen, long* lval) {
   long long llval;
 
-  if (!string2int(s, slen, &llval)) return 0;
+  if (string2int(s, slen, &llval) == 0) {
+    return 0;
+  }
 
-  if (llval < LONG_MIN || llval > LONG_MAX) return 0;
+  if (llval < LONG_MIN || llval > LONG_MAX) {
+    return 0;
+  }
 
-  *lval = (long)llval;
+  *lval = static_cast<long>(llval);
   return 1;
 }
 
@@ -400,11 +462,15 @@ int string2int(const char* s, size_t slen, long* lval) {
 int string2int(const char* s, size_t slen, unsigned long* lval) {
   long long llval;
 
-  if (!string2int(s, slen, &llval)) return 0;
+  if (string2int(s, slen, &llval) == 0) {
+    return 0;
+  }
 
-  if (llval > (long long)(ULONG_MAX)) return 0;
+  if (llval > static_cast<long long>(ULONG_MAX)) {
+    return 0;
+  }
 
-  *lval = (unsigned long)llval;
+  *lval = static_cast<unsigned long>(llval);
   return 1;
 }
 
@@ -414,16 +480,18 @@ int d2string(char* buf, size_t len, double value) {
   if (std::isnan(value)) {
     len = snprintf(buf, len, "nan");
   } else if (std::isinf(value)) {
-    if (value < 0)
+    if (value < 0) {
       len = snprintf(buf, len, "-inf");
-    else
+    } else {
       len = snprintf(buf, len, "inf");
+    }
   } else if (value == 0) {
     /* See: http://en.wikipedia.org/wiki/Signed_zero, "Comparisons". */
-    if (1.0 / value < 0)
+    if (1.0 / value < 0) {
       len = snprintf(buf, len, "-0");
-    else
+    } else {
       len = snprintf(buf, len, "0");
+    }
   } else {
 #if (DBL_MANT_DIG >= 52) && (LLONG_MAX == 0x7fffffffffffffffLL)
     /* Check if the float is in a safe range to be casted into a
@@ -437,22 +505,26 @@ int d2string(char* buf, size_t len, double value) {
      * integer printing function that is much faster. */
     double min = -4503599627370495; /* (2^52)-1 */
     double max = 4503599627370496;  /* -(2^52) */
-    if (value > min && value < max && value == ((double)((long long)value)))
-      len = ll2string(buf, len, (long long)value);
-    else
+    if (value > min && value < max && value == (static_cast<double>(static_cast<long long>(value)))) {
+      len = ll2string(buf, len, static_cast<long long>(value));
+    } else  // NOLINT
 #endif
       len = snprintf(buf, len, "%.17g", value);
   }
 
-  return len;
+  return static_cast<int32_t>(len);
 }
 
 int string2d(const char* s, size_t slen, double* dval) {
   char* pEnd;
   double d = strtod(s, &pEnd);
-  if (pEnd != s + slen) return 0;
+  if (pEnd != s + slen) {
+    return 0;
+  }
 
-  if (dval != nullptr) *dval = d;
+  if (dval) {
+    *dval = d;
+  }
   return 1;
 }
 
@@ -460,12 +532,21 @@ int string2d(const char* s, size_t slen, double* dval) {
  * given execution of Redis, so that if you are talking with an instance
  * having run_id == A, and you reconnect and it has run_id == B, you can be
  * sure that it is either a different instance or it was restarted. */
-void getRandomHexChars(char* p, unsigned int len) {
+std::string getRandomHexChars(const size_t len) {
   FILE* fp = fopen("/dev/urandom", "r");
-  char charset[] = "0123456789abcdef";
-  unsigned int j;
+  DEFER {
+    if (fp) {
+      fclose(fp);
+      fp = nullptr;
+    }
+  };
 
-  if (fp == nullptr || fread(p, len, 1, fp) == 0) {
+  char charset[] = "0123456789abcdef";
+  unsigned int j{0};
+  std::string buf(len, '\0');
+  char* p = buf.data();
+
+  if (!fp || !fread(p, len, 1, fp)) {
     /* If we can't read from /dev/urandom, do some reasonable effort
      * in order to create some entropy, since this function is used to
      * generate run_id and cluster instance IDs */
@@ -493,11 +574,15 @@ void getRandomHexChars(char* p, unsigned int len) {
     }
     /* Finally xor it with rand() output, that was already seeded with
      * time() at startup. */
-    for (j = 0; j < len; j++) p[j] ^= rand();
+    for (j = 0; j < len; j++) {
+      p[j] = static_cast<char>(p[j] ^ rand());
+    }
   }
   /* Turn it into hex digits taking just 4 bits out of 8 for every byte. */
-  for (j = 0; j < len; j++) p[j] = charset[p[j] & 0x0F];
-  if (fp) fclose(fp);
+  for (j = 0; j < len; j++) {
+    p[j] = charset[p[j] & 0x0F];
+  }
+  return std::string(p, len);
 }
 
 std::vector<std::string>& StringSplit(const std::string& s, char delim, std::vector<std::string>& elems) {
@@ -505,14 +590,40 @@ std::vector<std::string>& StringSplit(const std::string& s, char delim, std::vec
   std::stringstream ss(s);
   std::string item;
   while (std::getline(ss, item, delim)) {
-    if (!item.empty()) elems.push_back(item);
+    if (!item.empty()) {
+      elems.push_back(item);
+    }
   }
   return elems;
 }
 
+void StringSplit2Set(const std::string& s, char delim, std::unordered_set<std::string>& elems) {
+  elems.clear();
+  std::stringstream ss(s);
+  std::string item;
+  while (std::getline(ss, item, delim)) {
+    item = pstd::StringTrim(item);
+    if (!item.empty()) {
+      elems.emplace(item);
+    }
+  }
+}
+
+std::string Set2String(const std::unordered_set<std::string>& elems, char delim) {
+  std::string value;
+  for (const auto &e : elems) {
+    value.append(e);
+    value.append(1, delim);
+  }
+  if (!value.empty()) {
+    value.resize(value.size() - 1);
+  }
+  return value;
+}
+
 std::string StringConcat(const std::vector<std::string>& elems, char delim) {
   std::string result;
-  std::vector<std::string>::const_iterator it = elems.begin();
+  auto it = elems.begin();
   while (it != elems.end()) {
     result.append(*it);
     result.append(1, delim);
@@ -536,11 +647,11 @@ std::string& StringToUpper(std::string& ori) {
 
 std::string IpPortString(const std::string& ip, int port) {
   if (ip.empty()) {
-    return std::string();
+    return {};
   }
   char buf[10];
   if (ll2string(buf, sizeof(buf), port) <= 0) {
-    return std::string();
+    return {};
   }
   return (ip + ":" + buf);
 }
@@ -576,7 +687,7 @@ std::string ToRead(const std::string& str) {
         read.append("\\b");
         break;
       default:
-        if (isprint(*iter)) {
+        if (isprint(*iter) != 0) {
           read.append(1, *iter);
         } else {
           snprintf(buf, sizeof(buf), "\\x%02x", static_cast<unsigned char>(*iter));
@@ -604,37 +715,49 @@ bool ParseIpPortString(const std::string& ip_port, std::string& ip, int& port) {
   if (1 != string2int(port_str.data(), port_str.size(), &lport)) {
     return false;
   }
-  port = (int)lport;
+  port = static_cast<int>(lport);
   return true;
 }
 
 // Trim charlist
 std::string StringTrim(const std::string& ori, const std::string& charlist) {
-  if (ori.empty()) return ori;
+  if (ori.empty()) {
+    return ori;
+  }
 
   size_t pos = 0;
-  int rpos = ori.size() - 1;
+  size_t rpos = ori.size() - 1;
   while (pos < ori.size()) {
     bool meet = false;
-    for (char c : charlist)
+    for (char c : charlist) {
       if (ori.at(pos) == c) {
         meet = true;
         break;
       }
-    if (!meet) break;
+    }
+    if (!meet) {
+      break;
+    }
     ++pos;
   }
-  while (rpos >= 0) {
+  while (rpos > 0) {
     bool meet = false;
-    for (char c : charlist)
+    for (char c : charlist) {
       if (ori.at(rpos) == c) {
         meet = true;
         break;
       }
-    if (!meet) break;
+    }
+    if (!meet) {
+      break;
+    }
     --rpos;
   }
   return ori.substr(pos, rpos - pos + 1);
+}
+
+bool isspace(const std::string& str) {
+  return std::count_if(str.begin(), str.end(), [](unsigned char c) { return std::isspace(c); });
 }
 
 }  // namespace pstd

@@ -8,63 +8,103 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 
+#include "include/acl.h"
 #include "include/pika_conf.h"
 #include "pstd/include/pstd_mutex.h"
 
-extern PikaConf* g_pika_conf;
+extern std::unique_ptr<PikaConf> g_pika_conf;
 
 PikaCmdTableManager::PikaCmdTableManager() {
-  cmds_ = new CmdTable();
+  cmds_ = std::make_unique<CmdTable>();
   cmds_->reserve(300);
-  InitCmdTable(cmds_);
 }
 
-PikaCmdTableManager::~PikaCmdTableManager() {
-  for (const auto& item : thread_distribution_map_) {
-    delete item.second;
+void PikaCmdTableManager::InitCmdTable(void) {
+  ::InitCmdTable(cmds_.get());
+  for (const auto& cmd : *cmds_) {
+    if (cmd.second->flag() & kCmdFlagsWrite) {
+      cmd.second->AddAclCategory(static_cast<uint32_t>(AclCategory::WRITE));
+    }
+    if (cmd.second->flag() & kCmdFlagsRead &&
+        !(cmd.second->AclCategory() & static_cast<uint32_t>(AclCategory::SCRIPTING))) {
+      cmd.second->AddAclCategory(static_cast<uint32_t>(AclCategory::READ));
+    }
+    if (cmd.second->flag() & kCmdFlagsAdmin) {
+      cmd.second->AddAclCategory(static_cast<uint32_t>(AclCategory::ADMIN) |
+                                 static_cast<uint32_t>(AclCategory::DANGEROUS));
+    }
+    if (cmd.second->flag() & kCmdFlagsPubSub) {
+      cmd.second->AddAclCategory(static_cast<uint32_t>(AclCategory::PUBSUB));
+    }
+    if (cmd.second->flag() & kCmdFlagsFast) {
+      cmd.second->AddAclCategory(static_cast<uint32_t>(AclCategory::FAST));
+    }
+    if (cmd.second->flag() & kCmdFlagsSlow) {
+      cmd.second->AddAclCategory(static_cast<uint32_t>(AclCategory::SLOW));
+    }
   }
-  DestoryCmdTable(cmds_);
-  delete cmds_;
+
+  CommandStatistics statistics;
+  for (auto& iter : *cmds_) {
+    cmdstat_map_.emplace(iter.first, statistics);
+    iter.second->SetCmdId(cmdId_++);
+  }
+}
+
+void PikaCmdTableManager::RenameCommand(const std::string before, const std::string after) {
+  auto it = cmds_->find(before);
+  if (it != cmds_->end()) {
+    if (after.length() > 0) {
+      cmds_->insert(std::pair<std::string, std::unique_ptr<Cmd>>(after, std::move(it->second)));
+    } else {
+      LOG(ERROR) << "The value of rename-command is null";
+    }
+    cmds_->erase(it);
+  }
+}
+
+std::unordered_map<std::string, CommandStatistics>* PikaCmdTableManager::GetCommandStatMap() {
+  return &cmdstat_map_;
 }
 
 std::shared_ptr<Cmd> PikaCmdTableManager::GetCmd(const std::string& opt) {
-  std::string internal_opt = opt;
+  const std::string& internal_opt = opt;
   return NewCommand(internal_opt);
 }
 
 std::shared_ptr<Cmd> PikaCmdTableManager::NewCommand(const std::string& opt) {
-  Cmd* cmd = GetCmdFromTable(opt, *cmds_);
+  Cmd* cmd = GetCmdFromDB(opt, *cmds_);
   if (cmd) {
     return std::shared_ptr<Cmd>(cmd->Clone());
   }
   return nullptr;
 }
 
+CmdTable* PikaCmdTableManager::GetCmdTable() { return cmds_.get(); }
+
+uint32_t PikaCmdTableManager::GetMaxCmdId() { return cmdId_; }
+
 bool PikaCmdTableManager::CheckCurrentThreadDistributionMapExist(const std::thread::id& tid) {
   std::shared_lock l(map_protector_);
-  if (thread_distribution_map_.find(tid) == thread_distribution_map_.end()) {
-    return false;
-  }
-  return true;
+  return thread_distribution_map_.find(tid) != thread_distribution_map_.end();
 }
 
 void PikaCmdTableManager::InsertCurrentThreadDistributionMap() {
   auto tid = std::this_thread::get_id();
-  PikaDataDistribution* distribution = nullptr;
-  distribution = new HashModulo();
+  std::unique_ptr<PikaDataDistribution> distribution = std::make_unique<HashModulo>();
   distribution->Init();
   std::lock_guard l(map_protector_);
-  thread_distribution_map_.emplace(tid, distribution);
+  thread_distribution_map_.emplace(tid, std::move(distribution));
 }
 
-uint32_t PikaCmdTableManager::DistributeKey(const std::string& key, uint32_t partition_num) {
-  auto tid = std::this_thread::get_id();
-  PikaDataDistribution* data_dist = nullptr;
-  if (!CheckCurrentThreadDistributionMapExist(tid)) {
-    InsertCurrentThreadDistributionMap();
-  }
+bool PikaCmdTableManager::CmdExist(const std::string& cmd) const { return cmds_->find(cmd) != cmds_->end(); }
 
-  std::shared_lock l(map_protector_);
-  data_dist = thread_distribution_map_[tid];
-  return data_dist->Distribute(key, partition_num);
+std::vector<std::string> PikaCmdTableManager::GetAclCategoryCmdNames(uint32_t flag) {
+  std::vector<std::string> result;
+  for (const auto& item : (*cmds_)) {
+    if (item.second->AclCategory() & flag) {
+      result.emplace_back(item.first);
+    }
+  }
+  return result;
 }

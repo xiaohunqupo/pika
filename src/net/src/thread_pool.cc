@@ -8,21 +8,25 @@
 
 #include <sys/time.h>
 
+#include <string>
+#include <utility>
+
 namespace net {
 
 void* ThreadPool::Worker::WorkerMain(void* arg) {
-  ThreadPool* tp = static_cast<ThreadPool*>(arg);
+  auto tp = static_cast<ThreadPool*>(arg);
   tp->runInThread();
   return nullptr;
 }
 
 int ThreadPool::Worker::start() {
   if (!start_.load()) {
-    if (pthread_create(&thread_id_, nullptr, &WorkerMain, thread_pool_)) {
+    if (pthread_create(&thread_id_, nullptr, &WorkerMain, thread_pool_) != 0) {
       return -1;
     } else {
       start_.store(true);
-      SetThreadName(thread_id_, thread_pool_->thread_pool_name() + "Worker");
+      std::string thread_id_str = std::to_string(reinterpret_cast<unsigned long>(thread_id_));
+      SetThreadName(thread_id_, thread_pool_->thread_pool_name() + "_Worker_" + thread_id_str);
     }
   }
   return 0;
@@ -30,7 +34,7 @@ int ThreadPool::Worker::start() {
 
 int ThreadPool::Worker::stop() {
   if (start_.load()) {
-    if (pthread_join(thread_id_, nullptr)) {
+    if (pthread_join(thread_id_, nullptr) != 0) {
       return -1;
     } else {
       start_.store(false);
@@ -39,10 +43,10 @@ int ThreadPool::Worker::stop() {
   return 0;
 }
 
-ThreadPool::ThreadPool(size_t worker_num, size_t max_queue_size, const std::string& thread_pool_name)
+ThreadPool::ThreadPool(size_t worker_num, size_t max_queue_size, std::string  thread_pool_name)
     : worker_num_(worker_num),
       max_queue_size_(max_queue_size),
-      thread_pool_name_(thread_pool_name),
+      thread_pool_name_(std::move(thread_pool_name)),
       running_(false),
       should_stop_(false) {}
 

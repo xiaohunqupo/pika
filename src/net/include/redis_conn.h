@@ -17,15 +17,15 @@
 
 namespace net {
 
-typedef std::vector<std::string> RedisCmdArgsType;
+using RedisCmdArgsType = std::vector<std::string>;
 
 enum HandleType { kSynchronous, kAsynchronous };
 
 class RedisConn : public NetConn {
  public:
-  RedisConn(const int fd, const std::string& ip_port, Thread* thread, NetMultiplexer* net_mpx = nullptr,
-            const HandleType& handle_type = kSynchronous, const int rbuf_max_len = REDIS_MAX_MESSAGE);
-  virtual ~RedisConn();
+  RedisConn(int fd, const std::string& ip_port, Thread* thread, NetMultiplexer* net_mpx = nullptr,
+            const HandleType& handle_type = kSynchronous, int rbuf_max_len = REDIS_MAX_MESSAGE);
+  ~RedisConn() override;
 
   ReadStatus GetRequest() override;
   WriteStatus SendReply() override;
@@ -39,6 +39,7 @@ class RedisConn : public NetConn {
   void NotifyEpoll(bool success);
 
   virtual int DealMessage(const RedisCmdArgsType& argv, std::string* response) = 0;
+  virtual const std::string& GetCurrentTable() = 0;
 
  private:
   static int ParserDealMessageCb(RedisParser* parser, const RedisCmdArgsType& argv);
